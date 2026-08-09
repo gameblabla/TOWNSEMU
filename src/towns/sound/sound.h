@@ -49,6 +49,24 @@ public:
 #endif
 
 		RINGBUFFER_CLEAR_TIME=2000000000,  // Run 2 seconds after last wave generation to clear the ring buffer.  1 second should be enough, but just to be absolutely sure.
+
+		// How far behind the VM clock the wave-segment clock is put when
+		// it (re)starts - see TownsSound::ProcessSound.  This is the
+		// generator's head start: audio can only be generated for VM
+		// time that has already been simulated, so without it every
+		// segment would be produced at the last possible moment and the
+		// host's ring buffer could never build any depth.
+		WAVEGEN_TARGET_LAG_SEGMENTS=2,
+
+		// Lag past which the segment clock is jumped forward instead of
+		// caught up segment by segment.  Ordinary backpressure can only
+		// hold it back by as much as the host will queue - the ring
+		// buffer is asked for FM_PCM_MILLISEC_PER_WAVE*2 plus the safety
+		// buffer - so this has to sit clear of that or it would fire
+		// during normal playback and audibly cut it, and equally it has
+		// to stay small enough that the gap it skips is never heard as
+		// latency.
+		WAVEGEN_MAX_LAG_TIME=400000000, // 400ms
 	};
 
 	virtual const char *DeviceName(void) const{return "SOUND";}

@@ -1179,13 +1179,30 @@ public:
 	}
 	inline void EndMakeWave(YM2612 *ym)
 	{
-		while(schedPtr<ym->regWriteSched.size())
+		// Consume the writes that belong to this segment - i.e. those
+		// timestamped at or before its end - and leave anything later
+		// queued for the segment that covers it.  This used to apply
+		// every queued write and clear the queue outright, which threw
+		// away the timing of any write the VM had already made past
+		// the segment end: they all landed on the segment's last
+		// sample, so the audio in between was lost.  Harmless for FM
+		// tone registers, but with channel-6 DAC streaming every write
+		// is one PCM sample, so that was dropped audio.  See
+		// TownsSound::ProcessSound, which now advances the segment
+		// clock in fixed steps so "past the end" is a well-defined,
+		// bounded amount of look-ahead rather than an open-ended dump.
+		while(schedPtr<ym->regWriteSched.size() &&
+		      ym->regWriteSched[schedPtr].systemTimeInNS<=ym->waveGenEndTime)
 		{
 			auto &sched=ym->regWriteSched[schedPtr];
 			ym->ReallyWriteRegister(sched.chBase,sched.reg,sched.data,sched.systemTimeInNS);
 			++schedPtr;
 		}
-		ym->regWriteSched.clear();
+		if(0<schedPtr)
+		{
+			ym->regWriteSched.erase(ym->regWriteSched.begin(),ym->regWriteSched.begin()+schedPtr);
+			schedPtr=0;
+		}
 	}
 };
 
@@ -1252,7 +1269,18 @@ long long int YM2612::MakeWaveForNSamplesTemplate(unsigned char wave[],unsigned 
 				// channel from playingCh, since it never went through
 				// KeyOn() and so its slots' toneDurationMicrosecS12/
 				// microsecS12 look "already done").
-				int ampl=((int)state.dacData-128)*state.volume/32;
+				// Scale to match the FM slot path's output range (see
+				// the commented-out "Test only Slot 3" reference just
+				// below in ChannelOutput(), which shows a single
+				// full-scale slot maxing out around state.volume via
+				// .../UNSCALED_MAX(2048)) rather than a made-up
+				// divisor: dacData-128 maxes at +-128, so /128 caps
+				// this channel's contribution at roughly state.volume,
+				// matching a normal channel instead of running ~4x
+				// hotter and repeatedly tripping Gain()'s overflow
+				// halving against other active channels - which is
+				// what was producing garbled/warbling output.
+				int ampl=((int)state.dacData-128)*state.volume/128;
 				ch.lastAmplitudeMax=std::max(ch.lastAmplitudeMax,std::abs(ampl));
 				leftOut=Gain(leftOut,(LeftANDPtn[chNum]&ampl));
 				rightOut=Gain(rightOut,(RightANDPtn[chNum]&ampl));

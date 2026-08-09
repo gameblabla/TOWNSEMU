@@ -1243,17 +1243,27 @@ void TownsCDROM::BeginReadSector(DiscImage::MinSecFrm msfBegin,DiscImage::MinSec
 					state.DEI=false;
 					state.DTSF=false;
 					state.STSF=false;
+					// Not std::endl - this is on a real-time-critical path (the VM
+					// thread that also drives audio production, see
+					// TownsThread::VMMainLoopTemplate/AdjustRealTime) and can fire
+					// in fast-repeating bursts (each retry of a still-not-serviced
+					// read times out again after another LOSTDATA_TIMEOUT). Under
+					// redirected/piped stdout, std::endl's forced flush turns each
+					// occurrence into a blocking syscall; a burst of them measured
+					// as a single ~500ms real-time stall (and matching SDL3 audio
+					// underrun) despite townsTime itself never falling behind -
+					// i.e. this print was the stall, not a symptom of one.
 					if(CDCMD_MODE1READ==(state.cmd&0x9F))
 					{
-						std::cout << "MODE1READ time out." << std::endl;
+						std::cout << "MODE1READ time out.\n";
 					}
 					else if(CDCMD_MODE2READ==(state.cmd&0x9F))
 					{
-						std::cout << "MODE2READ time out." << std::endl;
+						std::cout << "MODE2READ time out.\n";
 					}
 					else
 					{
-						std::cout << "RAWREAD time out." << std::endl;
+						std::cout << "RAWREAD time out.\n";
 					}
 					return;
 				}

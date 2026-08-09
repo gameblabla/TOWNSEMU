@@ -388,15 +388,60 @@ void TownsSound::ProcessSound(void)
 	    townsPtr->state.townsTime<lastFMPCMWaveGenTime+RINGBUFFER_CLEAR_TIME) &&
 	    nullptr!=outside_world)
 	{
-		if(true==nextFMPCMWave.empty())
-		{
-			const unsigned int WAVE_OUT_SAMPLING_RATE=YM2612::WAVE_SAMPLING_RATE; // Align with YM2612.
-			const uint32_t numSamplesPerWave=FM_PCM_MILLISEC_PER_WAVE*WAVE_OUT_SAMPLING_RATE/1000;
+		const unsigned int WAVE_OUT_SAMPLING_RATE=YM2612::WAVE_SAMPLING_RATE; // Align with YM2612.
+		const uint32_t numSamplesPerWave=FM_PCM_MILLISEC_PER_WAVE*WAVE_OUT_SAMPLING_RATE/1000;
+		const uint64_t segmentTimeInNS=(uint64_t)numSamplesPerWave*1000000000ull/WAVE_OUT_SAMPLING_RATE;
 
+		// The wave segment clock.  A segment is always numSamplesPerWave
+		// samples, i.e. always segmentTimeInNS of *audio*, so the VM
+		// time it is taken to represent has to advance by exactly that
+		// much too - lastFMPCMWaveGenTime+=segmentTimeInNS below.
+		//
+		// It used to be set to townsTime after each segment instead,
+		// which silently made a segment represent however much VM time
+		// happened to pass between two calls here.  That interval is
+		// not segmentTimeInNS: generation is driven by the host audio
+		// ring buffer having room, not by the VM clock, so it wanders
+		// by milliseconds either way and only averages out over time.
+		// Whatever really elapsed got squeezed into (or stretched over)
+		// a fixed-length segment, so scheduled register writes landed
+		// at the wrong sample, and any stamped past the assumed end
+		// were dumped onto its last sample by EndMakeWave.  FM tones do
+		// not care - their pitch comes from the segment's own sample
+		// clock, and register writes are sparse.  Channel-6 DAC
+		// streaming is the opposite: every write is one PCM sample, so
+		// this showed up directly as dropped and stretched samples
+		// (measured: ~17% of DAC steps held 2-3x their length, and the
+		// output no longer correlating with the source PCM at all).
+		//
+		// Consequences of a fixed-step clock: the segment being
+		// generated must lie entirely in VM time that has already
+		// happened, hence the gate below; and the generator sits a
+		// little behind the VM, which is the audio latency and is what
+		// lets it stay ahead of the host's ring buffer.
+		if(townsPtr->state.townsTime<lastFMPCMWaveGenTime ||
+		   lastFMPCMWaveGenTime+WAVEGEN_MAX_LAG_TIME<townsPtr->state.townsTime)
+		{
+			// Reset, state load, resume from pause, a stretch with no
+			// sound at all, or a host stall - anything that leaves the
+			// segment clock further behind than the host's ring buffer
+			// could explain.  Catching that up segment by segment
+			// would queue the whole gap as stale audio and keep the
+			// latency forever, so jump the clock instead, to a target
+			// lag that leaves something to generate right away.
+			const uint64_t lag=segmentTimeInNS*WAVEGEN_TARGET_LAG_SEGMENTS;
+			lastFMPCMWaveGenTime=(lag<townsPtr->state.townsTime ? townsPtr->state.townsTime-lag : 0);
+			state.ym2612.FlushRegisterSchedule();
+		}
+
+		if(true==nextFMPCMWave.empty() &&
+		   lastFMPCMWaveGenTime+segmentTimeInNS<=townsPtr->state.townsTime)
+		{
 			nextFMPCMWave.resize(numSamplesPerWave*4);
 			memset(nextFMPCMWave.data(),0,nextFMPCMWave.size());
 
-			bool wavGenerated=false;
+			state.ym2612.waveGenEndTime=lastFMPCMWaveGenTime+segmentTimeInNS;
+
 			if(true==IsFMPlaying())
 			{
 				// Per the FM TOWNS Technical Databook (Table I-5-42/I-5-43):
@@ -418,7 +463,6 @@ void TownsSound::ProcessSound(void)
 					dummy.resize(numSamplesPerWave*4);
 					state.ym2612.MakeWaveForNSamples(dummy.data(),numSamplesPerWave,lastFMPCMWaveGenTime);
 				}
-				wavGenerated=true;
 			}
 			if(true==IsPCMPlaying())
 			{
@@ -448,7 +492,6 @@ void TownsSound::ProcessSound(void)
 						ch.IRQAfterThisPlayBack=false;
 					}
 				}
-				wavGenerated=true;
 			}
 			if(true==IsHighResPCMPlaying())
 			{
@@ -461,17 +504,14 @@ void TownsSound::ProcessSound(void)
 				{
 					highResPCM.AddWaveForNumSamples(nextFMPCMWave.data(),numSamplesPerWave,WAVE_OUT_SAMPLING_RATE);
 				}
-				wavGenerated=true;
 			}
 			if(true==cdrom->CDDAIsPlaying() && 0!=(state.audioFlag&64))
 			{
 				cdrom->AddWaveForNumSamples(nextFMPCMWave.data(),numSamplesPerWave,WAVE_OUT_SAMPLING_RATE);
-				wavGenerated=true;
 			}
 			if(true==scsi->CDDAIsPlaying())
 			{
 				scsi->AddWaveForNumSamples(nextFMPCMWave.data(),numSamplesPerWave,WAVE_OUT_SAMPLING_RATE);
-				wavGenerated=true;
 			}
 			if(true==IsPCMRecording())
 			{
@@ -509,12 +549,12 @@ void TownsSound::ProcessSound(void)
 						balance-=YM2612::WAVE_SAMPLING_RATE;
 					}
 				}
-				wavGenerated=true;
 			}
-			if(true==wavGenerated)
-			{
-				lastFMPCMWaveGenTime=townsPtr->state.townsTime;
-			}
+			// Unconditionally, including when nothing was playing and
+			// the segment is silence: it still represents this much VM
+			// time, and not advancing would leave the gate above
+			// permanently open, spinning out silent segments.
+			lastFMPCMWaveGenTime+=segmentTimeInNS;
 		}
 	}
 

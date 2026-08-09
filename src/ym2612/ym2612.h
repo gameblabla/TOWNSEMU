@@ -636,6 +636,15 @@ public:
 	      (2) VM needs to remember when the wave was generated for the last time, and pass it to MakeWaveForNSamples.
 	*/
 	bool useScheduling=false;
+
+	/* VM time at which the wave segment being generated ends, i.e. the
+	   segment covers [lastWaveGenTime,waveGenEndTime], which is exactly
+	   the nominal duration of the samples it contains.  Scheduled
+	   register writes stamped after it belong to a later segment and
+	   are kept queued rather than applied - see EndMakeWave, and see
+	   TownsSound::ProcessSound for how the segment clock advances. */
+	uint64_t waveGenEndTime=0;
+
 	std::vector <RegWriteLog> regWriteSched;
 	void FlushRegisterSchedule(void);
 };

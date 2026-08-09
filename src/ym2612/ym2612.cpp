@@ -378,7 +378,8 @@ unsigned int YM2612::WriteRegister(unsigned int channelBase,unsigned int reg,uns
 	   (REG_KEY_ON_OFF==reg ||
 	    (0xA8<=reg && reg<=0xAE) || // Special 3CH F-Number/BLOCK
 	    (0x30<=reg && reg<=0x9E) || // Per Channel per slot
-	    (0xA0<=reg && reg<=0xB6)))
+	    (0xA0<=reg && reg<=0xB6) ||
+	    REG_DAC_DATA==reg || REG_DAC_ENABLE==reg)) // Channel-6 DAC override - see ym2612wave.cpp's dacEnable handling.
 	{
 		return WriteRegisterSchedule(channelBase,reg,value,systemTimeInNS);
 	}
