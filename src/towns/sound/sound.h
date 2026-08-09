@@ -61,6 +61,21 @@ public:
 		unsigned int audioFlag;
 		unsigned int addrLatch[2];
 
+		// Real YM2612 (and real FM TOWNS, per software that polls this -
+		// see TOWNSIO_SOUND_STATUS_ADDRESS0's IOReadByte) raises its busy
+		// flag for a short time after a *data*-register write (not an
+		// address-register write - confirmed against real-hardware-tested
+		// software, e.g. FMTOWNS_32KHZPCM_WITHDAC, which relies on this
+		// busy flag to pace raw DAC sample output through TOWNSIO_SOUND_
+		// DATA0/0x4DA). Previously IOReadByte always reported "not busy",
+		// so anything pacing itself against this flag (rather than a
+		// fixed delay loop) ran unthrottled - harmless for register
+		// writes that don't care about timing, but wrong for software
+		// using it as its only sample-rate clock. townsTime (nanoseconds)
+		// at/after which the busy flag should read clear again; 0 means
+		// not busy.
+		uint64_t dacBusyUntil=0;
+
 		int lastAudioOut=0; // This will not be state-saved.  Updated in ProcessSound.
 
 		RF5C68 rf5c68;
@@ -99,7 +114,13 @@ public:
 
 	inline bool IsFMPlaying(void) const
 	{
-		return 0!=state.ym2612.state.playingCh || 0<state.ym2612.regWriteSched.size();
+		// state.dacEnable (channel-6 DAC mode) isn't reflected in
+		// playingCh - see YM2612::State::dacEnable's comment - so it
+		// needs its own check here, or ProcessSound() below never
+		// calls MakeWaveForNSamples while only the DAC is active
+		// (no FM notes key-on'd), and DAC audio never reaches the
+		// output ring buffer / recording.
+		return 0!=state.ym2612.state.playingCh || 0<state.ym2612.regWriteSched.size() || true==state.ym2612.state.dacEnable;
 	}
 	inline bool IsPCMPlaying(void) const
 	{

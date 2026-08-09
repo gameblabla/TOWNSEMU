@@ -11,5 +11,11 @@ elseif(APPLE)
 	mark_as_advanced(COCOA_LIB)
 	target_link_libraries(${TARGET_NAME} yssimplesound_macosx ${COCOA_LIB})
 elseif(UNIX)
-	target_link_libraries(${TARGET_NAME} yssimplesound_linux_alsa)
+	# yssimplesound_platform is the alias the top-level yssimplesound
+	# CMakeLists.txt points at whichever backend it actually selected
+	# (SDL3, falling back to ALSA, falling back to nownd - see that
+	# file) - link against that instead of hardcoding one backend's
+	# target name, so this stays correct regardless of which backend
+	# got picked.
+	target_link_libraries(${TARGET_NAME} yssimplesound_platform)
 endif()

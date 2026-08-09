@@ -128,6 +128,8 @@ void YM2612::State::Reset(void)
 	playingCh=0;
 	LFO=0;
 	FREQCTRL=0;
+	dacEnable=false;
+	dacData=0x80;
 }
 
 ////////////////////////////////////////////////////////////
@@ -165,6 +167,14 @@ void YM2612::MakeRegWriteCaseTable(void)
 		else if(REG_LFO==reg)
 		{
 			regWriteCaseTable[reg]=REGWRITE_LFO;
+		}
+		else if(REG_DAC_DATA==reg)
+		{
+			regWriteCaseTable[reg]=REGWRITE_DAC_DATA;
+		}
+		else if(REG_DAC_ENABLE==reg)
+		{
+			regWriteCaseTable[reg]=REGWRITE_DAC_ENABLE;
 		}
 		else if(0xA8<=reg && reg<=0xAE) // Special 3CH F-Number/BLOCK
 		{
@@ -505,6 +515,12 @@ unsigned int YM2612::ReallyWriteRegister(unsigned int channelBase,unsigned int r
 			state.LFO=(0!=(value&8));
 			state.FREQCTRL=value&7;
 		}
+		break;
+	case REGWRITE_DAC_DATA:
+		state.dacData=value&0xFF;
+		break;
+	case REGWRITE_DAC_ENABLE:
+		state.dacEnable=(0!=(value&0x80));
 		break;
 	case REGWRITE_3CH_SPECIAL:
 		{

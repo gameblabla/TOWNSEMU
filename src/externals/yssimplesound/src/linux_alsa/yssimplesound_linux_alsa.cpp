@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <stdio.h>
 #include <vector>
+#include <deque>
 #include <iostream>
 #include "yssimplesound.h"
 
@@ -160,7 +161,21 @@ std::vector <YsSoundPlayer::APISpecificData *> YsSoundPlayer::APISpecificData::a
 class YsSoundPlayer::Stream::APISpecificData
 {
 public:
-	SoundData playing,standBy;
+	// TownsSound's DAC-streaming use case (continuous, many-second raw
+	// PCM output from a single-threaded, real-time-paced VM - see the
+	// single main loop in townsthread.cpp, and this file's own
+	// top-of-file comment on ALSA playback here not actually being
+	// asynchronous - KeepPlaying()/the write callback is driven from
+	// that same thread) can produce audio chunks in bursts relative to
+	// how often this backend actually gets serviced. A hard 2-deep
+	// buffer (one "playing" + one "standBy") left no slack for that:
+	// AddNextStreamingSegmentAPISpecific() silently dropped a new
+	// segment - permanently losing that slice of audio with no retry -
+	// the moment both were still full, which one missed/late service
+	// window was enough to trigger. Use a small ring instead so
+	// occasional servicing jitter doesn't turn into permanent gaps.
+	std::deque<SoundData> pending;
+	static const size_t MAX_PENDING=16; // ~16*40ms=640ms of slack.
 };
 
 void YsSoundPlayer::APISpecificData::PlayingSound::Make(SoundData &dat,YSBOOL loop)
@@ -550,16 +565,13 @@ void YsSoundPlayer::APISpecificData::KeepPlaying(void)
 				{
 					unsigned int writePtr=0;
 					YSBOOL loop=YSFALSE;
-					if(0!=p.dat->api->playing.NTimeStep())
+					if(true!=p.dat->api->pending.empty() && 0!=p.dat->api->pending.front().NTimeStep())
 					{
-						bool firstBufferDone=PopulateWriteBuffer(writePtr,p.ptr,&p.dat->api->playing,loop,nThSound);
-						if(true==firstBufferDone)
+						bool firstBufferDone=PopulateWriteBuffer(writePtr,p.ptr,&p.dat->api->pending.front(),loop,nThSound);
+						if(true==firstBufferDone && 1<p.dat->api->pending.size())
 						{
 							// PopulateWriteBuffer returning true means the buffer is gone to the end.
-							if(0!=p.dat->api->standBy.NTimeStep())
-							{
-								PopulateWriteBuffer(writePtr,0,&p.dat->api->standBy,loop,nThSound);
-							}
+							PopulateWriteBuffer(writePtr,0,&p.dat->api->pending[1],loop,nThSound);
 						}
 						++nThSound;
 						writeBufFilledInNStep=std::max(writePtr,writeBufFilledInNStep);
@@ -611,21 +623,15 @@ void YsSoundPlayer::APISpecificData::KeepPlaying(void)
 					}
 					for(auto &p : playingStream)
 					{
-						if(nullptr!=p.dat)
+						if(nullptr!=p.dat && true!=p.dat->api->pending.empty())
 						{
-							p.ptr+=nWritten*p.dat->api->playing.PlayBackRate()/outPlaybackRate;
-							if(p.dat->api->playing.NTimeStep()<=p.ptr)
+							p.ptr+=nWritten*p.dat->api->pending.front().PlayBackRate()/outPlaybackRate;
+							while(true!=p.dat->api->pending.empty() && p.dat->api->pending.front().NTimeStep()<=p.ptr)
 							{
-								p.ptr-=p.dat->api->playing.NTimeStep();
-								p.dat->api->playing.MoveFrom(p.dat->api->standBy);
-								p.dat->api->standBy.CleanUp();
-								if(p.dat->api->playing.NTimeStep()<=p.ptr)
-								{
-									p.dat->api->playing.CleanUp();
-									p.ptr=0;
-								}
+								p.ptr-=p.dat->api->pending.front().NTimeStep();
+								p.dat->api->pending.pop_front();
 							}
-							if(0==p.dat->api->playing.NTimeStep())
+							if(true==p.dat->api->pending.empty())
 							{
 								p.ptr=0;
 							}
@@ -1040,7 +1046,7 @@ void YsSoundPlayer::StopStreamingAPISpecific(Stream &stream)
 YSBOOL YsSoundPlayer::StreamPlayerReadyToAcceptNextNumSampleAPISpecific(const Stream &stream,unsigned int) const
 {
 	APISpecificData::TimerMaskGuard tmg;
-	if(0==stream.api->standBy.NTimeStep())
+	if(stream.api->pending.size()<Stream::APISpecificData::MAX_PENDING)
 	{
 		return YSTRUE;
 	}
@@ -1049,15 +1055,11 @@ YSBOOL YsSoundPlayer::StreamPlayerReadyToAcceptNextNumSampleAPISpecific(const St
 YSRESULT YsSoundPlayer::AddNextStreamingSegmentAPISpecific(Stream &stream,const SoundData &dat)
 {
 	APISpecificData::TimerMaskGuard tmg;
-	if(0==stream.api->playing.NTimeStep())
+	if(stream.api->pending.size()>=Stream::APISpecificData::MAX_PENDING)
 	{
-		stream.api->playing.CopyFrom(dat);
-		return YSOK;
+		return YSERR;
 	}
-	if(0==stream.api->standBy.NTimeStep())
-	{
-		stream.api->standBy.CopyFrom(dat);
-		return YSOK;
-	}
-	return YSERR;
+	stream.api->pending.emplace_back();
+	stream.api->pending.back().CopyFrom(dat);
+	return YSOK;
 }

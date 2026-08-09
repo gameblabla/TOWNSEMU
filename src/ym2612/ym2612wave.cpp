@@ -1060,7 +1060,10 @@ std::vector <unsigned char> YM2612::MakeWaveAllChannels(unsigned long long int m
 	unsigned int playingCh[NUM_CHANNELS];
 	for(unsigned int chNum=0; chNum<NUM_CHANNELS; ++chNum)
 	{
-		if(0!=(state.playingCh&(1<<chNum)))
+		// DAC mode (channel 6) isn't gated by key-on/playingCh - real
+		// hardware plays REG_DAC_DATA the instant REG_DAC_ENABLE's
+		// bit7 is set. See YM2612::State::dacEnable's comment.
+		if(0!=(state.playingCh&(1<<chNum)) || (DAC_CHANNEL==chNum && true==state.dacEnable))
 		{
 			playingCh[nPlayingCh++]=chNum;
 		}
@@ -1238,6 +1241,24 @@ long long int YM2612::MakeWaveForNSamplesTemplate(unsigned char wave[],unsigned 
 		{
 			auto chNum=playingCh[j];
 			auto &ch=state.channels[chNum];
+
+			if(DAC_CHANNEL==chNum && true==state.dacEnable)
+			{
+				// Channel 6 DAC override: real hardware plays the raw
+				// sample in REG_DAC_DATA directly, bypassing the slot/
+				// envelope machinery entirely - so skip straight to
+				// mixing it in instead of falling into the FM slot
+				// code below (which would also incorrectly drop this
+				// channel from playingCh, since it never went through
+				// KeyOn() and so its slots' toneDurationMicrosecS12/
+				// microsecS12 look "already done").
+				int ampl=((int)state.dacData-128)*state.volume/32;
+				ch.lastAmplitudeMax=std::max(ch.lastAmplitudeMax,std::abs(ampl));
+				leftOut=Gain(leftOut,(LeftANDPtn[chNum]&ampl));
+				rightOut=Gain(rightOut,(RightANDPtn[chNum]&ampl));
+				continue;
+			}
+
 			if(ch.slots[0].toneDurationMicrosecS12<=ch.slots[0].microsecS12 &&
 			   ch.slots[1].toneDurationMicrosecS12<=ch.slots[1].microsecS12 &&
 			   ch.slots[2].toneDurationMicrosecS12<=ch.slots[2].microsecS12 &&
@@ -1376,7 +1397,10 @@ long long int YM2612::MakeWaveForNSamples(unsigned char wavBuf[],unsigned long l
 	unsigned int playingCh[NUM_CHANNELS];
 	for(unsigned int chNum=0; chNum<NUM_CHANNELS; ++chNum)
 	{
-		if(0!=(state.playingCh&(1<<chNum)))
+		// DAC mode (channel 6) isn't gated by key-on/playingCh - real
+		// hardware plays REG_DAC_DATA the instant REG_DAC_ENABLE's
+		// bit7 is set. See YM2612::State::dacEnable's comment.
+		if(0!=(state.playingCh&(1<<chNum)) || (DAC_CHANNEL==chNum && true==state.dacEnable))
 		{
 			playingCh[nPlayingCh++]=chNum;
 		}
@@ -1416,7 +1440,10 @@ long long int YM2612::AddWaveForNSamples(unsigned char wavBuf[],unsigned long lo
 	unsigned int playingCh[NUM_CHANNELS];
 	for(unsigned int chNum=0; chNum<NUM_CHANNELS; ++chNum)
 	{
-		if(0!=(state.playingCh&(1<<chNum)))
+		// DAC mode (channel 6) isn't gated by key-on/playingCh - real
+		// hardware plays REG_DAC_DATA the instant REG_DAC_ENABLE's
+		// bit7 is set. See YM2612::State::dacEnable's comment.
+		if(0!=(state.playingCh&(1<<chNum)) || (DAC_CHANNEL==chNum && true==state.dacEnable))
 		{
 			playingCh[nPlayingCh++]=chNum;
 		}

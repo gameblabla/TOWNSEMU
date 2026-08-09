@@ -16,17 +16,36 @@ elseif(APPLE)
 	set(SRCS ${SUBDIR}/yssimplesound_macosx_cpp.cpp ${SUBDIR}/yssimplesound_macosx_objc.m)
 	set(LIBS ${AVFOUNDATION_LIB})
 elseif(UNIX)
-	find_library(ALSALIB NAMES asound)
-	set(DUMMY_LIBRARY_NAME yssimplesound_linux_alsa)
-	set(SUBDIR linux_alsa)
-	if(NOT "${ALSALIB}" STREQUAL "ALSALIB-NOTFOUND")
-		set(LIBS ${ALSALIB})
-		set(SRCS ${SUBDIR}/yssimplesound_linux_alsa.cpp)
+	# SDL3 is preferred here over the raw ALSA backend: ALSA's draining
+	# is only ever driven synchronously by this emulator's single VM
+	# thread (see linux_alsa/yssimplesound_linux_alsa.cpp's own
+	# comments), through what was originally a hard 2-segment buffer
+	# that silently dropped audio the instant both segments were full -
+	# a real, reproduced problem for TownsSound's continuous multi-
+	# second FM_PCM/DAC streaming. SDL3's audio streams are drained by
+	# SDL's own dedicated thread at the real device rate, independent of
+	# this emulator's call cadence, which fixes that structurally rather
+	# than by further tuning buffer sizes.
+	find_package(SDL3 QUIET)
+	if(TARGET SDL3::SDL3)
+		set(DUMMY_LIBRARY_NAME yssimplesound_sdl3)
+		set(SUBDIR sdl3)
+		set(LIBS SDL3::SDL3)
+		set(SRCS ${SUBDIR}/yssimplesound_sdl3.cpp)
 	else()
-		message("ALSA library not found.")
-		message("No sound will be played with yssimplesound library.")
-		set(LIBS)
-		set(SRCS nownd/yssimplesound_nownd.cpp)
+		message("SDL3 not found - falling back to ALSA.")
+		find_library(ALSALIB NAMES asound)
+		set(DUMMY_LIBRARY_NAME yssimplesound_linux_alsa)
+		set(SUBDIR linux_alsa)
+		if(NOT "${ALSALIB}" STREQUAL "ALSALIB-NOTFOUND")
+			set(LIBS ${ALSALIB})
+			set(SRCS ${SUBDIR}/yssimplesound_linux_alsa.cpp)
+		else()
+			message("ALSA library not found.")
+			message("No sound will be played with yssimplesound library.")
+			set(LIBS)
+			set(SRCS nownd/yssimplesound_nownd.cpp)
+		endif()
 	endif()
 endif()
 

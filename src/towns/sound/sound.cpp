@@ -13,12 +13,27 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 
 << LICENSE */
 #include <cstring>
+#include <algorithm>
+#include <cstdlib>
+#include <cstdio>
 #include "townsdef.h"
 #include "sound.h"
 #include "towns.h"
 #include "outside_world.h"
 
 
+
+// How long the YM2612's busy flag (TOWNSIO_SOUND_STATUS_ADDRESS0/0x4D8
+// bit7) stays set after a *data*-register write (TOWNSIO_SOUND_DATA0/
+// DATA1) - address-register writes don't set it. 30us is the figure
+// software that relies on this for timing (rather than a fixed delay
+// loop) was written and confirmed against on real hardware - see
+// FMTOWNS_32KHZPCM_WITHDAC, which uses this flag as its only pacing
+// clock for outputting raw 8-bit samples through the YM2612's channel-6
+// DAC (register 0x2A/0x2B). Previously IOReadByte reported "not busy"
+// unconditionally, so DAC playback through this emulator ran as fast as
+// the CPU could execute instead of at the real sample rate.
+#define YM2612_DATA_WRITE_BUSY_NS 30000ULL
 
 void TownsSound::State::PowerOn(void)
 {
@@ -34,6 +49,15 @@ void TownsSound::State::Reset(void)
 }
 void TownsSound::State::ResetVariables(void)
 {
+	dacBusyUntil=0;
+	// Confirmed against IOMON: the FM TOWNS boot ROM's own POST writes
+	// 0x00 to both TOWNSIO_SOUND_MUTE(0x4D5) and TOWNSIO_SOUND_AUDIO
+	// (0x4EC) (addresses 0x766/0x769 in the boot ROM), and minimal
+	// bare-metal software downstream of that (e.g.
+	// FMTOWNS_32KHZPCM_WITHDAC, confirmed audible on real Marty
+	// hardware) never touches either port again - so 0/0 is real
+	// hardware's actual audible state post-boot, not a muted/disabled
+	// one. See the matching ProcessSound() polarity fixes.
 	muteFlag=0;
 	audioFlag=0;
 	addrLatch[0]=0;
@@ -91,6 +115,7 @@ void TownsSound::SetSCSIPointer(TownsSCSI *scsi)
 		{
 			state.ym2612.WriteRegister(0,state.addrLatch[0],data,townsPtr->state.townsTime);
 			ProcessRecordFMWrite(VGMRecorder::REG_YM2612_CH0,state.addrLatch[0],data);
+			state.dacBusyUntil=townsPtr->state.townsTime+YM2612_DATA_WRITE_BUSY_NS;
 		}
 		break;
 	case TOWNSIO_SOUND_ADDRESS1://          0x4DC, // [2] pp.18,
@@ -100,6 +125,7 @@ void TownsSound::SetSCSIPointer(TownsSCSI *scsi)
 		{
 			state.ym2612.WriteRegister(3,state.addrLatch[1],data,townsPtr->state.townsTime);
 			ProcessRecordFMWrite(VGMRecorder::REG_YM2612_CH3,state.addrLatch[1],data);
+			state.dacBusyUntil=townsPtr->state.townsTime+YM2612_DATA_WRITE_BUSY_NS;
 		}
 		break;
 	case TOWNSIO_SOUND_INT_REASON://        0x4E9, // [2] pp.19,
@@ -210,6 +236,7 @@ void TownsSound::ProcessRecordPCMWrite(unsigned int reg,unsigned char data)
 		data=0b01111100;
 		data|=(true==state.ym2612.TimerAUp() ? 1 : 0);
 		data|=(true==state.ym2612.TimerBUp() ? 2 : 0);
+		data|=(townsPtr->state.townsTime<state.dacBusyUntil ? 0x80 : 0);
 		break;
 	case TOWNSIO_SOUND_DATA0://             0x4DA, // [2] pp.18,
 		// Write Only
@@ -358,7 +385,7 @@ void TownsSound::ProcessSound(void)
 	    true==IsHighResPCMPlaying() ||
 	    true==cdrom->CDDAIsPlaying() ||
 	    true==scsi->CDDAIsPlaying() ||
-	    townsPtr->state.townsTime<lastFMPCMWaveGenTime+RINGBUFFER_CLEAR_TIME) && 
+	    townsPtr->state.townsTime<lastFMPCMWaveGenTime+RINGBUFFER_CLEAR_TIME) &&
 	    nullptr!=outside_world)
 	{
 		if(true==nextFMPCMWave.empty())
@@ -372,6 +399,14 @@ void TownsSound::ProcessSound(void)
 			bool wavGenerated=false;
 			if(true==IsFMPlaying())
 			{
+				// Per the FM TOWNS Technical Databook (Table I-5-42/I-5-43):
+				// TOWNSIO_SOUND_MUTE(0x4D5) FM/PCM MUTE bits are "0 = muted,
+				// 1 = not muted", and TOWNSIO_SOUND_AUDIO(0x4EC) MUTE bit6
+				// is "0 = no output, 1 = output" - i.e. the bit must be SET
+				// for audio to come out, in both registers. Both default to
+				// 0 (muted/no-output) at reset, matching the databook's "at
+				// reset time, this bit is zero, so in order for audio
+				// output to occur, it must be set to 1".
 				if(0!=(state.muteFlag&2) && 0!=(state.audioFlag&64))
 				{
 					state.ym2612.MakeWaveForNSamples(nextFMPCMWave.data(),numSamplesPerWave,lastFMPCMWaveGenTime);
@@ -391,6 +426,7 @@ void TownsSound::ProcessSound(void)
 
 				// Brandish expects PCM interrupt even when muted.
 				// Therefore, PCM wave must be generated and played for making IRQ.
+				// See the FM case just above - bit set means "not muted".
 				if(0!=(state.muteFlag&1) && 0!=(state.audioFlag&64))
 				{
 					state.rf5c68.AddWaveForNumSamples(nextFMPCMWave.data(),numSamplesPerWave,WAVE_OUT_SAMPLING_RATE,lastFMPCMWaveGenTime);

@@ -71,6 +71,7 @@ public:
 	{
 		NUM_SLOTS=4,
 		NUM_CHANNELS=6,
+		DAC_CHANNEL=5, // 0-based index of "channel 6", the only channel with DAC-override capability.
 
 		// Sine table
 		PHASE_STEPS=4096,      // 4096=360degrees
@@ -115,6 +116,8 @@ public:
 		REG_TIMER_B_COUNT=0x26,
 		REG_TIMER_CONTROL=0x27,
 		REG_KEY_ON_OFF=0x28,
+		REG_DAC_DATA=0x2A,   // Channel-6 DAC raw sample, unsigned 8-bit (0x80=center/silence).
+		REG_DAC_ENABLE=0x2B, // Bit7: 1=channel 6 plays REG_DAC_DATA instead of its FM slots.
 
 	#ifdef YM_PRESCALER_CONFIGURABLE
 		REG_PRESCALER_0=0x2D,
@@ -281,6 +284,17 @@ public:
 		bool timerUp[2];
 		unsigned int playingCh; // Bit 0 to 5.
 
+		// Channel-6 (chNum==DAC_CHANNEL) DAC mode - see REG_DAC_DATA/
+		// REG_DAC_ENABLE. Unlike normal FM channels, DAC output isn't
+		// gated by key-on/playingCh: real hardware plays whatever's in
+		// REG_DAC_DATA the instant REG_DAC_ENABLE's bit7 is set, so the
+		// wave-generation entry points (MakeWaveAllChannels/
+		// MakeWaveForNSamples/AddWaveForNSamples in ym2612wave.cpp)
+		// force channel 6 into the playing set whenever dacEnable is
+		// true, regardless of playingCh.
+		bool dacEnable=false;
+		unsigned int dacData=0x80; // Unsigned 8-bit, 0x80=center/silence.
+
 		int volume=WAVE_OUTPUT_AMPLITUDE_MAX_DEFAULT;
 
 		void PowerOn(void);
@@ -339,6 +353,8 @@ public:
 		REGWRITE_BLOCK_FNUM2,
 		REGWRITE_FB_CONNECT,
 		REGWRITE_L_R_AMS_PMS,
+		REGWRITE_DAC_DATA,
+		REGWRITE_DAC_ENABLE,
 	#ifdef YM_PRESCALER_CONFIGURABLE
 		REGWRITE_PRESCALER_0,
 		REGWRITE_PRESCALER_1,
