@@ -79,20 +79,21 @@ public:
 		unsigned int audioFlag;
 		unsigned int addrLatch[2];
 
-		// Real YM2612 (and real FM TOWNS, per software that polls this -
-		// see TOWNSIO_SOUND_STATUS_ADDRESS0's IOReadByte) raises its busy
-		// flag for a short time after a *data*-register write (not an
-		// address-register write - confirmed against real-hardware-tested
-		// software, e.g. FMTOWNS_32KHZPCM_WITHDAC, which relies on this
-		// busy flag to pace raw DAC sample output through TOWNSIO_SOUND_
-		// DATA0/0x4DA). Previously IOReadByte always reported "not busy",
-		// so anything pacing itself against this flag (rather than a
-		// fixed delay loop) ran unthrottled - harmless for register
-		// writes that don't care about timing, but wrong for software
-		// using it as its only sample-rate clock. townsTime (nanoseconds)
-		// at/after which the busy flag should read clear again; 0 means
-		// not busy.
-		uint64_t dacBusyUntil=0;
+		// A real YM2612 raises the busy flag read back at
+		// TOWNSIO_SOUND_STATUS_ADDRESS0 (0x4D8, bit 7) for a fixed number of
+		// its own clock cycles after any register write - both the address
+		// registers (0x4D8/0x4DC) and the data registers (0x4DA/0x4DE), for
+		// different lengths. It is a write interlock: it says the chip has
+		// not finished taking the last write, nothing more.
+		//
+		// Before this was modelled at all, IOReadByte reported "not busy"
+		// unconditionally, so anything polling the flag rather than using a
+		// fixed delay ran unthrottled. See the YM2612_BUSY_* constants in
+		// sound.cpp for the durations and where they come from.
+		//
+		// townsTime (nanoseconds) at/after which the flag reads clear again;
+		// 0 means not busy.
+		uint64_t ym2612BusyUntil=0;
 
 		int lastAudioOut=0; // This will not be state-saved.  Updated in ProcessSound.
 
