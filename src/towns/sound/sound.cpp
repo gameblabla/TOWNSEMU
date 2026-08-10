@@ -24,46 +24,53 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 
 
 // How long the YM2612's busy flag (TOWNSIO_SOUND_STATUS_ADDRESS0/0x4D8
-// bit7) stays set after a register write.
+// bit7) stays set after a *data*-register write (TOWNSIO_SOUND_DATA0/DATA1).
+// Address-register writes deliberately do not set it.
 //
-// On real silicon this is a fixed number of cycles of the clock fed to the
-// chip, and it depends on what was written: an address-register write is
-// short, and a data write to a register below 0xA0 takes noticeably longer
-// than one at or above it (0xA0+ is the frequency/block bank, which the chip
-// latches differently). The three cycle counts below are Nemesis's
-// measurements from real YM2612 hardware, the same values BlastEm uses in
-// ym2612.c (BUSY_CYCLES_ADDRESS / _DATA_LOW / _DATA_HIGH), expressed there in
-// cycles of the chip's input clock.
+// Read this before "correcting" the number: it is a system-level calibration,
+// not the chip's own busy time, and it is calibrated against real hardware.
 //
-// For the clock, TOWNS's YM2612 is treated as running at 8MHz. That is not an
-// independent guess: ym2612.h calibrates this chip's timers against real TOWNS
-// hardware and settles on a 2MHz master clock with a 3x prescaler, i.e. a
-// 666.67kHz internal clock and a timer-A step of 12 internal cycles = 18us. A
-// real YM2612's timer-A step is 144 input clocks, and 144/18us is exactly
-// 8MHz - so 8MHz is the input clock that reproduces the timer behaviour
-// already calibrated here.
+// The evidence it reproduces is FMTOWNS_32KHZPCM_WITHDAC, whose playback loop
+// is confirmed working on a real Marty and uses this flag as its only pacing
+// clock for streaming 8-bit samples to the channel-6 DAC. Its author recorded
+// what they saw in dac_pcm.c: "look like busy flag updated 30us after write to
+// only data register, and no update when writing to the address register."
+// Their clip is authored at 32000Hz and plays at the right pitch, so on real
+// hardware that loop's period really is ~31us - both halves of the comment are
+// an observation of a working machine, which is the only hard data point
+// available here.
 //
-// This replaces a flat 30us for every data write and nothing at all for
-// address writes. The 30us came from a comment in the FMTOWNS_32KHZPCM_WITHDAC
-// sample ("look like busy flag updated 30us after write to only data
-// register"), whose author was timing their own playback loop rather than the
-// flag: their loop reaches ~32kHz on real hardware, but the busy flag is only
-// part of its period - the rest is I/O access time, including the deliberate
-// 1us wait at port 0x6C. Taking the whole period as the flag's duration made
-// the flag about three times too long.
+// A chip-level model was tried and reverted. Nemesis's YM2612 measurements
+// (as used by BlastEm: 17 input-clock cycles for an address write, 83 for a
+// data write below register 0xA0, 47 at or above) work out to about 2.1, 10.4
+// and 5.9us at the ~8MHz this chip appears to run at on TOWNS. Those numbers
+// may well be right for the silicon - but plugging them in here made the
+// FMTOWNS_32KHZPCM_WITHDAC loop run roughly three times too fast, because on
+// real hardware the rest of that loop's ~31us is I/O access time on a slow
+// sound bus, and Tsugaru charges I/O instructions only their nominal i486
+// clocks. Splitting 31us into a short flag plus wait states the emulator does
+// not model gives a chip-accurate flag and a system that behaves wrong, which
+// is the worse trade: what software actually observes is the loop period.
 //
-// Caveat worth stating plainly: Tsugaru charges I/O instructions only their
-// nominal i486 clocks and does not model the sound bus's wait states, so a
-// program that paces itself off this flag will still not land on exactly the
-// same rate it does on hardware. What changes here is that the flag itself now
-// behaves like the chip. Software wanting an accurate rate should pace from
-// the free-running 1us timer at I/O 0x26 instead; the flag is a register-write
-// interlock, not a sample clock.
-#define YM2612_CLOCK_HZ            8000000LL
-#define YM2612_BUSY_CYCLES_ADDRESS       17
-#define YM2612_BUSY_CYCLES_DATA_LOW      83  // register < 0xA0
-#define YM2612_BUSY_CYCLES_DATA_HIGH     47  // register >= 0xA0
-#define YM2612_BUSY_NS(cycles) ((unsigned long long)(cycles)*1000000000ULL/YM2612_CLOCK_HZ)
+// So the figure here stands in for chip busy time *plus* the unmodelled bus
+// wait states, and is right for the same reason the observation is: it
+// reproduces the machine. If Tsugaru ever models sound-port wait states, this
+// should be revisited together with them, not on its own.
+//
+// It was 30us until the 1us-wait register at 0x6C was found to be unrouted
+// (see the AddDevice call in towns.cpp): accesses to it cost nothing, so this
+// constant had silently been absorbing the microsecond that dac_pcm.c's loop
+// spends there once per sample. Now that 0x6C costs its documented 1us, the
+// same microsecond is subtracted from here, which leaves the loop's total
+// period - the thing actually calibrated against hardware - unchanged, while
+// moving one microsecond of it to the mechanism that really produces it.
+// Measured in-machine before and after: 31.42us per iteration both times.
+//
+// None of this makes the flag a sample clock. It is a register-write
+// interlock, and its duration here is only as meaningful as the loop it was
+// calibrated with. Software wanting an exact rate should pace against the
+// free-running 1us counter at I/O 0x26 instead.
+#define YM2612_DATA_WRITE_BUSY_NS 29000ULL
 
 void TownsSound::State::PowerOn(void)
 {
@@ -140,26 +147,22 @@ void TownsSound::SetSCSIPointer(TownsSCSI *scsi)
 		break;
 	case TOWNSIO_SOUND_STATUS_ADDRESS0://   0x4D8, // [2] pp.18,
 		state.addrLatch[0]=data&0xff;
-		state.ym2612BusyUntil=townsPtr->state.townsTime+YM2612_BUSY_NS(YM2612_BUSY_CYCLES_ADDRESS);
 		break;
 	case TOWNSIO_SOUND_DATA0://             0x4DA, // [2] pp.18,
 		{
 			state.ym2612.WriteRegister(0,state.addrLatch[0],data,townsPtr->state.townsTime);
 			ProcessRecordFMWrite(VGMRecorder::REG_YM2612_CH0,state.addrLatch[0],data);
-			state.ym2612BusyUntil=townsPtr->state.townsTime+YM2612_BUSY_NS(
-			    state.addrLatch[0]<0xA0 ? YM2612_BUSY_CYCLES_DATA_LOW : YM2612_BUSY_CYCLES_DATA_HIGH);
+			state.ym2612BusyUntil=townsPtr->state.townsTime+YM2612_DATA_WRITE_BUSY_NS;
 		}
 		break;
 	case TOWNSIO_SOUND_ADDRESS1://          0x4DC, // [2] pp.18,
 		state.addrLatch[1]=data&0xff;
-		state.ym2612BusyUntil=townsPtr->state.townsTime+YM2612_BUSY_NS(YM2612_BUSY_CYCLES_ADDRESS);
 		break;
 	case TOWNSIO_SOUND_DATA1://             0x4DE, // [2] pp.18,
 		{
 			state.ym2612.WriteRegister(3,state.addrLatch[1],data,townsPtr->state.townsTime);
 			ProcessRecordFMWrite(VGMRecorder::REG_YM2612_CH3,state.addrLatch[1],data);
-			state.ym2612BusyUntil=townsPtr->state.townsTime+YM2612_BUSY_NS(
-			    state.addrLatch[1]<0xA0 ? YM2612_BUSY_CYCLES_DATA_LOW : YM2612_BUSY_CYCLES_DATA_HIGH);
+			state.ym2612BusyUntil=townsPtr->state.townsTime+YM2612_DATA_WRITE_BUSY_NS;
 		}
 		break;
 	case TOWNSIO_SOUND_INT_REASON://        0x4E9, // [2] pp.19,

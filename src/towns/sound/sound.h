@@ -79,17 +79,16 @@ public:
 		unsigned int audioFlag;
 		unsigned int addrLatch[2];
 
-		// A real YM2612 raises the busy flag read back at
-		// TOWNSIO_SOUND_STATUS_ADDRESS0 (0x4D8, bit 7) for a fixed number of
-		// its own clock cycles after any register write - both the address
-		// registers (0x4D8/0x4DC) and the data registers (0x4DA/0x4DE), for
-		// different lengths. It is a write interlock: it says the chip has
-		// not finished taking the last write, nothing more.
+		// The busy flag read back at TOWNSIO_SOUND_STATUS_ADDRESS0 (0x4D8,
+		// bit 7). Set after a data-register write (0x4DA/0x4DE) and not
+		// after an address-register write, matching what software confirmed
+		// working on real hardware observes - see YM2612_DATA_WRITE_BUSY_NS
+		// in sound.cpp for the duration, the evidence for it, and why a
+		// chip-cycle model was tried here and reverted.
 		//
 		// Before this was modelled at all, IOReadByte reported "not busy"
 		// unconditionally, so anything polling the flag rather than using a
-		// fixed delay ran unthrottled. See the YM2612_BUSY_* constants in
-		// sound.cpp for the durations and where they come from.
+		// fixed delay ran unthrottled.
 		//
 		// townsTime (nanoseconds) at/after which the flag reads clear again;
 		// 0 means not busy.

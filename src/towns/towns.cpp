@@ -766,6 +766,21 @@ FMTownsCommon::FMTownsCommon() :
 	io.AddDevice(&crtc,TOWNSIO_WRITE_TO_CLEAR_VSYNCIRQ); // 0x5CA
 
 
+	// 0x6C is the 1us-wait register: any access to it stalls the machine for
+	// a microsecond, which is how TOWNS software spaces out back-to-back
+	// writes to slow peripherals. IOWriteByte/IOReadByte have handled
+	// TOWNSIO_TIMER_1US_WAIT since forever, but the port was never registered
+	// here, so the handlers were unreachable and the wait never happened -
+	// accesses fell through to the default device and cost nothing. Measured
+	// in-machine at 0.82us per iteration for a loop whose only content was
+	// this write, where it should be at least 1us.
+	//
+	// This matters for exactly the software that leans on it: the DAC
+	// streaming loop in FMTOWNS_32KHZPCM_WITHDAC writes 0x6C once per sample
+	// deliberately. See YM2612_DATA_WRITE_BUSY_NS in sound/sound.cpp, which is
+	// calibrated against that loop's real-hardware rate and so had been
+	// absorbing this missing microsecond.
+	io.AddDevice(this,TOWNSIO_TIMER_1US_WAIT);  //        0x6C
 	io.AddDevice(this,TOWNSIO_POWER_CONTROL);   //        0x22
 	io.AddDevice(this,TOWNSIO_SERIAL_ROM_CTRL); //        0x32,
 	io.AddDevice(this,TOWNS_QUICK_DEBUG_BREAK); //        0xEA,  // Writing to this I/O port will break the VM.
