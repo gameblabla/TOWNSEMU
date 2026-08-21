@@ -87,6 +87,7 @@ void TownsRender::Prepare(const TownsCRTC &crtc)
 	{
 		crtcShowPage[0]=crtc.state.ShowPage(0);
 		crtc.MakePageLayerInfo(crtcLayer[0],0);
+		crtc.MakePageLayerInfo(crtcLayer[1],1);
 	}
 	else
 	{
@@ -179,7 +180,14 @@ void TownsRender::BuildImage(const unsigned char VRAM[],const TownsCRTC::AnalogP
 			}
 			else
 			{
-				Render<VRAM1Trans>(0,crtcLayer[0],palette,chaseHQPalette,VRAM,false);
+				if(8==crtcLayer[0].bitsPerPixel)
+				{
+					Render8BitSinglePage(crtcLayer,palette.plt256,VRAM);
+				}
+				else
+				{
+					Render<VRAM1Trans>(0,crtcLayer[0],palette,chaseHQPalette,VRAM,false);
+				}
 			}
 		}
 	}
@@ -304,6 +312,58 @@ void TownsRender::BuildImage(const unsigned char VRAM[],const TownsCRTC::AnalogP
 					}
 				}
 			}
+		}
+	}
+}
+
+void TownsRender::Render8BitSinglePage(const TownsCRTC::Layer layer[2],const Vec4ub palette[256],const unsigned char VRAM[])
+{
+	const auto &display=layer[0];
+	const int ZHsrc[2]={display.zoom2x.x()/2,(display.zoom2x.x()+1)/2};
+	const auto ZV=display.zoom2x.y()/2;
+	const auto bottomY=this->hei-ZV;
+
+	for(int y=0; y<display.sizeOnMonitor.y() && y+display.originOnMonitor.y()<=bottomY; y+=ZV)
+	{
+		auto X=display.originOnMonitor.x();
+		auto Y=y+display.originOnMonitor.y();
+		auto dstLine=rgba.data()+4*(Y*this->wid+X);
+		auto dst=dstLine;
+		unsigned int sourceX=0;
+		int ZHswitch=0;
+		auto ZH=ZHsrc[ZHswitch];
+
+		for(int x=0; x<display.sizeOnMonitor.x() && x+display.originOnMonitor.x()<this->wid && sourceX+display.VRAMHSkipBytes<display.bytesPerLine; ++x)
+		{
+			/* In 256-color single-page mode the two 256-KiB VRAM banks
+			 * provide alternating 32-bit groups.  Each bank has its own
+			 * CRTC register set (FA/FO/LO and scroll), even though they form
+			 * one displayed layer. */
+			const auto bank=(sourceX>>2)&1;
+			const auto &srcLayer=layer[bank];
+			const auto vramOffsetVertical=(srcLayer.VRAMOffset+srcLayer.FlipVRAMOffset)&~srcLayer.HScrollMask;
+			const auto vramOffsetHorizontal=(srcLayer.VRAMOffset+srcLayer.FlipVRAMOffset)&srcLayer.HScrollMask;
+			const auto srcY=(unsigned int)(y/ZV);
+			auto VRAMAddr=srcY*srcLayer.bytesPerLine+((sourceX+srcLayer.VRAMHSkipBytes+vramOffsetHorizontal)&srcLayer.HScrollMask);
+			VRAMAddr=(VRAMAddr+vramOffsetVertical)&srcLayer.VScrollMask;
+			VRAM1Trans::Trans(VRAMAddr);
+
+			auto col8=VRAM[VRAMAddr];
+			std::memcpy(dst,&palette[col8],4);
+			dst+=4;
+			if(0==(--ZH))
+			{
+				ZHswitch=1-ZHswitch;
+				ZH=ZHsrc[ZHswitch];
+				++sourceX;
+			}
+		}
+
+		auto copyPtr=dstLine+4*this->wid;
+		for(unsigned int zv=1; zv<ZV; ++zv)
+		{
+			std::memcpy(copyPtr,dstLine,dst-dstLine);
+			copyPtr+=4*this->wid;
 		}
 	}
 }
