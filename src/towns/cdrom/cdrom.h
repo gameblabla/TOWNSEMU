@@ -315,6 +315,22 @@ public:
 		unsigned int debugBreakOnSpecificCommand=0xffff;
 
 		std::vector <uint8_t> sectorCacheForCPUTransfer;
+
+		// -CDCSTRICT.  Enforces the parts of the sub-MPU handshake that every
+		// hardware-verified CDC driver observes but that Tsugaru has been
+		// letting programs skip.  Off by default: it makes the CDC reject
+		// sequences that Tsugaru has always accepted, so it is a diagnostic
+		// for driver authors who cannot test on real hardware, not a change to
+		// how titles run.  See TownsCDROM::StrictViolation() for the rules.
+		bool strictCDC=false;
+		enum
+		{
+			STRICT_NO_SETUP_COMMAND, // Read issued without the A0 setup command TBIOS always sends first.
+			STRICT_NOT_READY,        // Command or parameter written while DRY=0.
+			STRICT_NUM_RULES
+		};
+		bool strictReported[STRICT_NUM_RULES]={false,false};
+		bool sawSetupCommand=false;
 	};
 
 	State state;
@@ -323,6 +339,13 @@ public:
 	std::vector <std::string> searchPaths;
 
 	const char *DeviceName(void) const override {return "CDROM";}
+
+	/*! Report a -CDCSTRICT rule violation once per rule, and tell the caller
+	    whether strict enforcement is on.  Returns false (and prints nothing)
+	    when -CDCSTRICT is off, so every call site reads as
+	    "if(StrictViolation(rule)) { behave like real hardware }".
+	*/
+	bool StrictViolation(int rule);
 
 	TownsCDROM(class FMTownsCommon *townsPtr,class TownsPIC *PICPtr,class TownsDMAC *DMACPtr);
 	~TownsCDROM();

@@ -188,6 +188,40 @@ bool TownsCDROM::CanOpenCloseFromCommand(void) const
 	return TOWNSTYPE_2_MX<=townsPtr->townsType;
 }
 
+bool TownsCDROM::StrictViolation(int rule)
+{
+	if(true!=var.strictCDC)
+	{
+		return false;
+	}
+	if(rule<0 || Variables::STRICT_NUM_RULES<=rule || true==var.strictReported[rule])
+	{
+		return true;
+	}
+	var.strictReported[rule]=true;
+
+	static const char *const explanation[Variables::STRICT_NUM_RULES]=
+	{
+		"A read command (MODE1READ/MODE2READ/RAWREAD) was issued without the\n"
+		"  undocumented A0 setup command.  The CD-ROM BIOS sends A0 with parameters\n"
+		"  08 01 00 00 00 00 00 00 before every sector read; no driver that works on\n"
+		"  real hardware has been observed to skip it.  The command is acknowledged\n"
+		"  (status 00H) and then nothing further happens, which is what the one\n"
+		"  hardware data point looks like -- see the comment at the call site.",
+
+		"A command byte or a parameter byte was written while DRY (4C0H bit 0) was 0.\n"
+		"  The sub-MPU cannot accept commands in that state, so the byte is dropped.\n"
+		"  Poll 4C0H bit 0 before loading the parameter FIFO and again before writing\n"
+		"  the command register.",
+	};
+
+	std::cout << "[CDCSTRICT] " << explanation[rule] << std::endl;
+	std::cout << "  Last command " << cpputil::Ubtox(state.cmd)
+	          << "H issued from " << cpputil::Ustox(var.lastCmdIssuedAt.SEG)
+	          << ":" << cpputil::Uitox(var.lastCmdIssuedAt.OFFSET) << std::endl;
+	return true;
+}
+
 /* virtual */ void TownsCDROM::IOWriteByte(unsigned int ioport,unsigned int data)
 {
 	bool cmdOrParam=false;
@@ -232,6 +266,16 @@ bool TownsCDROM::CanOpenCloseFromCommand(void) const
 		// (Poly Racer test never came back.)
 		// The reason why Linux setup was failing was a different reason, so I decided not to clear the status queue here.
 
+		if(true!=state.DRY && true==StrictViolation(Variables::STRICT_NOT_READY))
+		{
+			break;
+		}
+		if(CDCMD_SETSTATE==(data&0x9F))
+		{
+			// The A0H setup command.  Its effect is undocumented, but the CD-ROM
+			// BIOS sends it immediately before every sector read.
+			var.sawSetupCommand=true;
+		}
 		state.cmdReceived=true;
 		state.cmd=data;
 		var.lastCmdIssuedAt.SEG=townsPtr->CPU().state.CS().value;
@@ -239,6 +283,10 @@ bool TownsCDROM::CanOpenCloseFromCommand(void) const
 		cmdOrParam=true;
 		break;
 	case TOWNSIO_CDROM_PARAMETER_DATA://    0x4C4, // [2] pp.224
+		if(true!=state.DRY && true==StrictViolation(Variables::STRICT_NOT_READY))
+		{
+			break;
+		}
 		if(8<=state.nParamQueue)
 		{
 			for(int i=0; i<PARAM_QUEUE_LEN-1; ++i)
@@ -719,6 +767,28 @@ void TownsCDROM::DelayedCommandExecution(unsigned long long int townsTime)
 			{
 				state.PushStatusQueue(0x21,9,0,0);
 				break;
+			}
+
+			// -CDCSTRICT: the CD-ROM BIOS sends the A0H setup command immediately
+			// before every sector read, and re-sends it for the next read.  A read
+			// that skips it is acknowledged -- the sub-MPU takes the command byte
+			// and posts "no error" -- but no sector is ever handed over.
+			//
+			// Accepted-then-silent, rather than an error status, is what the one
+			// hardware data point shows.  A Marty running such a driver sits on the
+			// frame it drew before the read for long enough to be photographed, and
+			// a driver that got an error code back would have returned, redrawn,
+			// and lost that frame.  Blocking forever is what a driver whose
+			// "command accepted" arm loops without a bound does.
+			{
+				const bool hadSetup=var.sawSetupCommand;
+				var.sawSetupCommand=false;
+				if(true!=hadSetup && true==StrictViolation(Variables::STRICT_NO_SETUP_COMMAND))
+				{
+					SetStatusNoError();
+					state.DRY=true;
+					break;
+				}
 			}
 
 			DiscImage::MinSecFrm msfBegin,msfEnd;

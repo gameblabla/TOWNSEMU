@@ -68,6 +68,10 @@ public:
 	bool noWaitStandby=false;
 	bool fastSCSI=false,fastFD=false;
 
+	// -CDCSTRICT.  Makes the CD-ROM controller reject command sequences that no
+	// driver known to work on real hardware uses.  See TownsCDROM::StrictViolation.
+	bool strictCDC=false;
+
 	bool highResAvailable=true;
 
 	bool highResPCM=true;

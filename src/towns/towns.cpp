@@ -180,6 +180,7 @@ void FMTownsCommon::State::PowerOn(void)
 	}
 
 	towns.scsi.fastMode=argv.fastSCSI;
+	towns.cdrom.var.strictCDC=argv.strictCDC;
 	for(int scsiID=0; scsiID<TownsStartParameters::MAX_NUM_SCSI_DEVICES; ++scsiID)
 	{
 		auto scsi=argv.scsiImg[scsiID];

@@ -104,6 +104,12 @@ void TownsARGV::PrintHelp(void) const
 	std::cout << "-NOWAITBOOT" << std::endl;
 	std::cout << "  No wait during the memory test, and then VM waits for real time when" << std::endl;
 	std::cout << "  VM time runs ahead of the real time." << std::endl;
+	std::cout << "-CDCSTRICT" << std::endl;
+	std::cout << "  Enforce the CD-ROM sub-MPU handshake rules that every driver known to work on" << std::endl;
+	std::cout << "  real hardware observes (A0H setup command before a read, DRY before writing" << std::endl;
+	std::cout << "  the command/parameter registers)." << std::endl;
+	std::cout << "  Off by default.  A diagnostic for writing a CD-ROM driver without hardware to" << std::endl;
+	std::cout << "  test on; it makes the CDC reject sequences Tsugaru has always accepted." << std::endl;
 	std::cout << "-FASTSCSI" << std::endl;
 	std::cout << "-NORMALSCSI" << std::endl;
 	std::cout << "-FASTFD" << std::endl;
@@ -650,6 +656,10 @@ bool TownsARGV::AnalyzeCommandParameter(int argc,char *argv[])
 		else if("-NORMALFD"==ARG || "-SLOWFD"==ARG)
 		{
 			fastFD=false;
+		}
+		else if("-CDCSTRICT"==ARG)
+		{
+			strictCDC=true;
 		}
 		else if("-NOWAITBOOT"==ARG)
 		{
