@@ -762,7 +762,11 @@ void TownsEventLog::Playback(class FMTownsCommon &towns)
 			case EVT_PAD0_RUN_DOWN:
 				if(dt<=tPassed)
 				{
-					towns.gameport.state.ports[0].button[2]=true;
+					// Port::button is bool[2].  button[2] and button[3] were
+					// writing one and two past the end of it, which lands on
+					// Port::left and Port::right -- RUN was moving the stick
+					// instead of pressing RUN.
+					towns.gameport.state.ports[0].run=true;
 					playbackPtr->tPlayed=now;
 					++playbackPtr;
 				}
@@ -770,7 +774,7 @@ void TownsEventLog::Playback(class FMTownsCommon &towns)
 			case EVT_PAD0_RUN_UP:
 				if(dt<=tPassed)
 				{
-					towns.gameport.state.ports[0].button[2]=false;
+					towns.gameport.state.ports[0].run=false;
 					playbackPtr->tPlayed=now;
 					++playbackPtr;
 				}
@@ -778,7 +782,7 @@ void TownsEventLog::Playback(class FMTownsCommon &towns)
 			case EVT_PAD0_SEL_DOWN:
 				if(dt<=tPassed)
 				{
-					towns.gameport.state.ports[0].button[3]=true;
+					towns.gameport.state.ports[0].pause=true;
 					playbackPtr->tPlayed=now;
 					++playbackPtr;
 				}
@@ -786,7 +790,7 @@ void TownsEventLog::Playback(class FMTownsCommon &towns)
 			case EVT_PAD0_SEL_UP:
 				if(dt<=tPassed)
 				{
-					towns.gameport.state.ports[0].button[3]=false;
+					towns.gameport.state.ports[0].pause=false;
 					playbackPtr->tPlayed=now;
 					++playbackPtr;
 				}
