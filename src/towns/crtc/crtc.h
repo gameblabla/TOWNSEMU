@@ -444,6 +444,20 @@ public:
 	*/
 	void MakePageLayerInfo(Layer &layer,unsigned char page) const;
 
+	/*! Make the Layer info for the second VRAM bank of the low-res single-page
+	    (256-color or 32768-color) mode.
+
+	    The single-page modes show one layer, but the picture is still fetched
+	    from the two VRAM banks alternately, and each bank is addressed by its
+	    own CRTC register set.  Only the address-generation registers
+	    (FA1/HAJ1/FO1/LO1) are per-bank; the color depth, zoom and position on
+	    the monitor belong to the single layer being shown and are taken from
+	    `bank0`.  In particular the layer-1 color bits of CR0 must NOT be
+	    consulted: software that programs one layer leaves them at 0, which
+	    would otherwise turn the second bank into a 4-bit fetch.
+	*/
+	void MakeSinglePageBank1LayerInfo(Layer &layer,const Layer &bank0) const;
+
 	/*! Returns a palette used.
 	    It can be conventional palette or high-res CRTC palette depending on state.highResCRTCEnabled.
 	*/

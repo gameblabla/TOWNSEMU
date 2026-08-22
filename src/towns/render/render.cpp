@@ -87,7 +87,9 @@ void TownsRender::Prepare(const TownsCRTC &crtc)
 	{
 		crtcShowPage[0]=crtc.state.ShowPage(0);
 		crtc.MakePageLayerInfo(crtcLayer[0],0);
-		crtc.MakePageLayerInfo(crtcLayer[1],1);
+		// The single-page modes still fetch from both VRAM banks, each driven
+		// by its own CRTC register set.  See Render8BitSinglePage().
+		crtc.MakeSinglePageBank1LayerInfo(crtcLayer[1],crtcLayer[0]);
 	}
 	else
 	{
@@ -148,6 +150,14 @@ void TownsRender::PrepareEntireVRAMLayer(const TownsCRTC &crtc,int layer)
 	{
 		crtcShowPage[0]=false;
 		crtcShowPage[1]=false;
+	}
+
+	// The whole-VRAM dump re-points layer 0 at a flat, unscrolled view of VRAM.
+	// Make the second bank agree with it so the dual-bank single-page renderer
+	// reproduces that flat view instead of mixing in the live CRTC registers.
+	if(true==crtcIsSinglePageMode)
+	{
+		crtcLayer[1]=crtcLayer[0];
 	}
 
 	crtcPriorityPage=crtc.GetPriorityPage();
@@ -316,46 +326,74 @@ void TownsRender::BuildImage(const unsigned char VRAM[],const TownsCRTC::AnalogP
 	}
 }
 
-void TownsRender::Render8BitSinglePage(const TownsCRTC::Layer layer[2],const Vec4ub palette[256],const unsigned char VRAM[])
+/*
+ * 8 bits/pixel, low-res single-page mode.
+ *
+ * The single-page modes show one layer, but the picture is still fetched from
+ * the two 256KB VRAM banks alternately -- that part is the VRAM1Trans address
+ * swizzle, which both the CPU-side mapping and this renderer apply.  What the
+ * single-layer appearance hides is that each bank is addressed by its OWN CRTC
+ * register set: bank 0 by FA0/HAJ0/FO0/LO0, bank 1 by FA1/HAJ1/FO1/LO1.  A
+ * program that programs only the layer-0 registers -- which looks harmless,
+ * since the mode shows one layer -- gets half of every scan line fetched from
+ * wherever the layer-1 registers happen to point.
+ *
+ * The hardware alternates between the two register sets every 16 bits of the
+ * fetched stream, i.e. every two 8-bit pixels.  That cadence is measured, not
+ * assumed: an FM TOWNS Marty capture of a 256x240 8bpp program that page-flips
+ * by writing FA0 (0000 <-> 1E00) while leaving FA1 at 0 shows a 4-pixel stripe
+ * period -- two pixels from the flipped page, two from page 0 -- across a
+ * 256-pixel line.  A 32-bit (4-pixel) cadence would have given an 8-pixel
+ * period, which is not what the hardware does.
+ *
+ * When a program does set both register sets to the same values -- what every
+ * correct program does -- both banks resolve to the same addresses and this is
+ * pixel-for-pixel identical to the old single-register-set rendering.
+ */
+void TownsRender::Render8BitSinglePage(const TownsCRTC::Layer bank[2],const Vec4ub palette[256],const unsigned char VRAM[])
 {
-	const auto &display=layer[0];
-	const int ZHsrc[2]={display.zoom2x.x()/2,(display.zoom2x.x()+1)/2};
+	const auto &display=bank[0];
+	const int ZHsrc[2]={display.zoom2x.x()/2,(display.zoom2x.x()+1)/2};  // For x.5 times zoom rate.
 	const auto ZV=display.zoom2x.y()/2;
 	const auto bottomY=this->hei-ZV;
 
+	unsigned int VRAMOffsetVertical[2],VRAMOffsetHorizontal[2];
+	for(int b=0; b<2; ++b)
+	{
+		const unsigned int offset=bank[b].VRAMOffset+bank[b].FlipVRAMOffset;
+		VRAMOffsetVertical[b]=offset&~bank[b].HScrollMask;
+		VRAMOffsetHorizontal[b]=offset&bank[b].HScrollMask;
+	}
+
+	unsigned int lineVRAMOffset[2]={0,0};
 	for(int y=0; y<display.sizeOnMonitor.y() && y+display.originOnMonitor.y()<=bottomY; y+=ZV)
 	{
 		auto X=display.originOnMonitor.x();
 		auto Y=y+display.originOnMonitor.y();
 		auto dstLine=rgba.data()+4*(Y*this->wid+X);
 		auto dst=dstLine;
-		unsigned int sourceX=0;
+
+		// One byte counter for the displayed line; which bank a byte comes out
+		// of is decided by VRAM1Trans, which register set addresses it is
+		// decided by bit 1 -- 16 bits per set.
+		unsigned int inLineVRAMOffset=0;
 		int ZHswitch=0;
 		auto ZH=ZHsrc[ZHswitch];
-
-		for(int x=0; x<display.sizeOnMonitor.x() && x+display.originOnMonitor.x()<this->wid && sourceX+display.VRAMHSkipBytes<display.bytesPerLine; ++x)
+		for(int x=0; x<display.sizeOnMonitor.x() && x+display.originOnMonitor.x()<this->wid && inLineVRAMOffset+bank[0].VRAMHSkipBytes<bank[0].bytesPerLine; ++x)
 		{
-			/* In 256-color single-page mode the two 256-KiB VRAM banks
-			 * provide alternating 32-bit groups.  Each bank has its own
-			 * CRTC register set (FA/FO/LO and scroll), even though they form
-			 * one displayed layer. */
-			const auto bank=(sourceX>>2)&1;
-			const auto &srcLayer=layer[bank];
-			const auto vramOffsetVertical=(srcLayer.VRAMOffset+srcLayer.FlipVRAMOffset)&~srcLayer.HScrollMask;
-			const auto vramOffsetHorizontal=(srcLayer.VRAMOffset+srcLayer.FlipVRAMOffset)&srcLayer.HScrollMask;
-			const auto srcY=(unsigned int)(y/ZV);
-			auto VRAMAddr=srcY*srcLayer.bytesPerLine+((sourceX+srcLayer.VRAMHSkipBytes+vramOffsetHorizontal)&srcLayer.HScrollMask);
-			VRAMAddr=(VRAMAddr+vramOffsetVertical)&srcLayer.VScrollMask;
+			const unsigned int b=(inLineVRAMOffset>>1)&1;
+			unsigned int VRAMAddr=lineVRAMOffset[b]+((inLineVRAMOffset+bank[b].VRAMHSkipBytes+VRAMOffsetHorizontal[b])&bank[b].HScrollMask);
+			VRAMAddr=bank[b].VRAMAddr+((VRAMAddr+VRAMOffsetVertical[b])&bank[b].VScrollMask);
 			VRAM1Trans::Trans(VRAMAddr);
 
-			auto col8=VRAM[VRAMAddr];
+			const unsigned char col8=VRAM[VRAMAddr];
 			std::memcpy(dst,&palette[col8],4);
 			dst+=4;
 			if(0==(--ZH))
 			{
 				ZHswitch=1-ZHswitch;
 				ZH=ZHsrc[ZHswitch];
-				++sourceX;
+				++inLineVRAMOffset;
 			}
 		}
 
@@ -365,6 +403,9 @@ void TownsRender::Render8BitSinglePage(const TownsCRTC::Layer layer[2],const Vec
 			std::memcpy(copyPtr,dstLine,dst-dstLine);
 			copyPtr+=4*this->wid;
 		}
+
+		lineVRAMOffset[0]+=bank[0].bytesPerLine;
+		lineVRAMOffset[1]+=bank[1].bytesPerLine;
 	}
 }
 

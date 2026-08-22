@@ -636,6 +636,32 @@ void TownsCRTC::MakeLowResPageLayerInfo(Layer &layer,unsigned char page) const
 	}
 }
 
+void TownsCRTC::MakeSinglePageBank1LayerInfo(Layer &layer,const Layer &bank0) const
+{
+	layer=bank0;
+
+	// Per-bank address generation.  bytesPerLine follows GetPageBytesPerLine(),
+	// which doubles LOx*4 in the single-page mode because one displayed line is
+	// taken from the two banks together.
+	layer.bytesPerLine=state.crtcReg[REG_LO1]*4*2;
+	if(true==cpputil::Is2toN(layer.bytesPerLine))
+	{
+		layer.HScrollMask=layer.bytesPerLine-1;
+	}
+	else
+	{
+		layer.HScrollMask=0xFFFFFFFF;
+	}
+
+	// Same scaling as GetPageVRAMAddressOffset(), but keyed off the bits per
+	// pixel of the layer actually being shown -- see the header comment.
+	const auto FA1=state.crtcReg[REG_FA1];
+	layer.VRAMOffset=(4==bank0.bitsPerPixel ? FA1*4 : FA1*8);
+
+	const auto rawZoomX=((state.crtcReg[REG_ZOOM]>>8)&15)+1;
+	layer.VRAMHSkipBytes=(((GetVRAMHSkip1X(1)/rawZoomX)*bank0.bitsPerPixel)>>3);
+}
+
 void TownsCRTC::MEMIOWriteFMRVRAMDisplayMode(unsigned char data)
 {
 	auto disp=((data>>2)&8)|(data&7);
