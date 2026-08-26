@@ -126,6 +126,123 @@ class i486DXDefaultFidelityOperation : public i486DXLowFidelityOperation
 public:
 	typedef i486DXDefaultFidelityOperation THISCLASS;
 
+	// Deliver a raised exception instead of leaving it pending.
+	//
+	// The page-table walk in LinearAddressToPhysicalAddressRead/Write raises EXCEPTION_PF on a
+	// not-present page at every fidelity level - that code is not fidelity-templated.  The read
+	// side of every instruction handles the flag itself (the "if(true!=state.exception)" branches
+	// around EvaluateOperandRegOrMem*), but the write side routes through HANDLE_EXCEPTION_IF_ANY,
+	// which the low-fidelity class defines as a no-op.  Nothing else ever clears state.exception,
+	// so at this fidelity level one faulting write left the flag set for the rest of the session,
+	// and from then on every instruction that guards its result on that flag quietly dropped it.
+	// The VM did not stop; it decayed.
+	//
+	// Found with WOLF4FMT (Wolfenstein 3D for FM TOWNS), which uses the 128KB sprite RAM as
+	// Wolfenstein's EGA "latch" store and writes ~196KB of pics into it.  RUN386 maps exactly the
+	// 32 pages the sprite RAM window has, so the write that crosses 81020000H is a not-present
+	// page fault.  The game survives it on hardware - the extender's own handler sees the fault -
+	// but in Tsugaru the fault went nowhere and the machine unravelled a few instructions later,
+	// ending up back at the COMMAND.COM prompt with the loading bar still on screen.
+	//
+	// Delivering is strictly better than dropping: a pending-forever exception has no correct
+	// continuation, so no software can have depended on the old behaviour.
+	inline static bool HandleExceptionIfAny(i486DXFidelityLayer<THISCLASS> &cpu,Memory &mem,uint32_t instNumBytes)
+	{
+		if(true==cpu.state.exception)
+		{
+			cpu.HandleException(true,mem,instNumBytes);
+			return true;
+		}
+		return false;
+	}
+
+	// Same delivery for the stack-adjusting instructions, and here the pre-instruction register
+	// values have to come back first.  A faulting PUSH has already decremented ESP by the time the
+	// access is attempted, so handing that ESP to the exception frame writes the frame one slot
+	// low and returns to a stack the extender no longer recognises - the debugger calls this out
+	// as "ESP value changed before handling exception".  Restoring is what makes the fault
+	// restartable, which is the whole point of delivering it.
+	//
+	// These carry the saved values rather than reusing the low-fidelity empty structs; the
+	// low-fidelity RestoreESPHighWord is re-declared for the new type and stays a no-op, so only
+	// the exception path changes.
+	class SavedESP
+	{
+	public:
+		uint32_t ESP;
+	};
+	inline static SavedESP SaveESP(uint8_t,uint32_t ESP)
+	{
+		SavedESP saved;
+		saved.ESP=ESP;
+		return saved;
+	}
+	inline void RestoreESPHighWord(uint8_t,uint32_t &,SavedESP){}
+	inline static bool HandleExceptionAndRestoreESPIfAny(i486DXFidelityLayer<THISCLASS> &cpu,Memory &mem,uint32_t instNumBytes,SavedESP saved)
+	{
+		if(true==cpu.state.exception)
+		{
+			cpu.state.ESP()=saved.ESP;
+			cpu.HandleException(true,mem,instNumBytes);
+			return true;
+		}
+		return false;
+	}
+
+	class SavedESPEBP
+	{
+	public:
+		uint32_t ESP,EBP;
+	};
+	inline static SavedESPEBP SaveESPEBP(uint8_t,uint32_t ESP,uint32_t EBP)
+	{
+		SavedESPEBP saved;
+		saved.ESP=ESP;
+		saved.EBP=EBP;
+		return saved;
+	}
+	inline static bool HandleExceptionAndRestoreESPEBPIfAny(i486DXFidelityLayer<THISCLASS> &cpu,Memory &mem,uint32_t instNumBytes,SavedESPEBP saved)
+	{
+		if(true==cpu.state.exception)
+		{
+			cpu.state.ESP()=saved.ESP;
+			cpu.state.EBP()=saved.EBP;
+			cpu.HandleException(true,mem,instNumBytes);
+			return true;
+		}
+		return false;
+	}
+
+	class SavedECX
+	{
+	public:
+		uint32_t ECX;
+	};
+	inline static SavedECX SaveECX(uint32_t ECX)
+	{
+		SavedECX saved;
+		saved.ECX=ECX;
+		return saved;
+	}
+	inline static bool HandleExceptionAndRestoreECXIfAny(i486DXFidelityLayer<THISCLASS> &cpu,Memory &mem,uint32_t instNumBytes,const SavedECX saved)
+	{
+		if(true==cpu.state.exception)
+		{
+			cpu.state.ECX()=saved.ECX;
+			cpu.HandleException(true,mem,instNumBytes);
+			return true;
+		}
+		return false;
+	}
+
+	// An instruction fetch that crosses into a not-present page raises PF the same way.
+	// EXCEPTION_LOCK_MAYBE, the other thing the high-fidelity version of this hook sorts out,
+	// is only ever raised by its OnLock, so there is nothing to disambiguate here.
+	inline static bool HandleExceptionAfterFetchInstruction(i486DXFidelityLayer<THISCLASS> &cpu,Memory &mem,const i486DXCommon::Instruction &,const i486DXCommon::Operand &)
+	{
+		return HandleExceptionIfAny(cpu,mem,0);
+	}
+
 	static inline bool SegmentReadException(class i486DXCommon &cpu,const i486DXCommon::SegmentRegister &seg,uint32_t offset,uint32_t bytes)
 	{
 		if(seg.maxLimit<offset) // Needed to run Fractal Engine Demo and other Psygnosis games.
