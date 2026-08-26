@@ -97,6 +97,36 @@ Memory::Memory()
 	}
 }
 
+void Memory::EnableBusTimingModel(unsigned int dwordBusCycles)
+{
+	this->dwordBusCycles=(0<dwordBusCycles ? dwordBusCycles : 1);
+	busWaitClockTable.resize((size_t)1<<(32-GRANURALITY_SHIFT));
+	for(auto &w : busWaitClockTable)
+	{
+		w=0;
+	}
+	busWaitClockPtr=busWaitClockTable.data();
+	busWaitClocks=0;
+}
+
+void Memory::SetBusWaitClocks(unsigned int physAddrLow,unsigned int physAddrHigh,unsigned int clocks)
+{
+	if(nullptr==busWaitClockPtr)
+	{
+		return;
+	}
+	if(255<clocks)
+	{
+		clocks=255;
+	}
+	auto low=physAddrLow>>GRANURALITY_SHIFT;
+	auto high=physAddrHigh>>GRANURALITY_SHIFT;
+	for(auto i=low; i<=high && i<busWaitClockTable.size(); ++i)
+	{
+		busWaitClockTable[i]=(unsigned char)clocks;
+	}
+}
+
 void Memory::CleanUp(void)
 {
 	for(auto &ptr : memAccessPtr)

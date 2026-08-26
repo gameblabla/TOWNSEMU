@@ -189,6 +189,15 @@ public:
 	unsigned int freq=40;
 	unsigned int slowModeFreq=0; // 0->No Change
 
+	// 386-class timing model (-CPUCLOCKSCALE, -BUSWAIT, -VRAMBUSWAIT,
+	// -DATABUSWIDTH).  Left at these defaults the model stays off and
+	// timing is exactly what it always was.  See FMTownsCommon::var's
+	// cpuClockScalePercent for what each one means.
+	unsigned int cpuClockScalePercent=100;
+	unsigned int busWaitClocks=0;
+	unsigned int VRAMBusWaitClocks=0;
+	unsigned int dataBusWidth=0; // 0->Follow the machine ID.
+
 	unsigned int mouseIntegrationSpeed=256;
 	bool considerVRAMOffsetInMouseIntegration=true;
 	enum

@@ -331,6 +331,29 @@ public:
 
 		unsigned int slowModeFreq=FREQUENCY_SLOWMODE_DEFAULT;
 
+		/*! 80386 timing model (-CPUCLOCKSCALE / -BUSWAIT / -VRAMBUSWAIT).
+
+		    The CPU core is a 486 whatever -TOWNSTYPE says, and a 486 retires
+		    most instructions in a fraction of the clocks a 386 needs -- so a
+		    Marty modelled at its real 16 MHz still runs several times faster
+		    than the machine on the desk.  cpuClockScalePercent multiplies the
+		    core's per-instruction clock count (250 = "this instruction takes
+		    2.5x as many clocks as the 486 core charged"), which covers the
+		    386's slower microcode and its lack of a cache on instruction
+		    fetch.
+
+		    busWaitClocks/VRAMBusWaitClocks are charged per data bus cycle on
+		    top of that, through Memory's bus-timing model -- see
+		    Memory::EnableBusTimingModel().  They are what makes a VRAM store
+		    cost more than a main-RAM store, which is the distinction that
+		    decides whether a software change is worth making on this machine.
+		    Zero on both leaves the model off entirely and Tsugaru behaves
+		    exactly as before.
+		*/
+		unsigned int cpuClockScalePercent=100;
+		unsigned int busWaitClocks=0;
+		unsigned int VRAMBusWaitClocks=0;
+
 		/*! VM State loaded at start-up.
 		    Loaded in TownsThread::VMStart
 		*/
@@ -818,6 +841,20 @@ public:
 	*/
 	void AdjustMachineSpeedForMemoryWait(void);
 
+	/*! Repaint Memory's per-region bus-wait table from var.busWaitClocks /
+	    var.VRAMBusWaitClocks and the 5E0H/5E2H/5E6H wait-state registers.
+	    No-op unless the bus-timing model was enabled.  See towns.cpp's
+	    EnableCPU386TimingModel().
+	*/
+	void UpdateBusWaitStates(void);
+
+	/*! Turn on the 386-class timing model: an instruction-clock scale
+	    factor plus per-bus-cycle wait states on data accesses.
+	    dataBusWidth is 16 or 32.
+	*/
+	void EnableCPU386TimingModel(unsigned int dataBusWidth,unsigned int clockScalePercent,
+	                             unsigned int RAMWait,unsigned int VRAMWait);
+
 	// VM<->Host Interface
 	void ProcessVMToHostCommand(unsigned int vmCmd,unsigned int paramLen,const unsigned char param[]);
 	void VMHostFileTransfer(void);
@@ -1031,7 +1068,13 @@ public:
 	inline unsigned int RunOneInstruction(void)
 	{
 		auto clocksPassed=_cpu.RunOneInstruction(mem,io);
-		state.clockBalance+=clocksPassed*1000;
+		// See var.cpuClockScalePercent: the 486 core's clock count scaled to
+		// the modelled CPU, plus the data-bus wait states this instruction
+		// racked up in Memory.  Both are no-ops at their defaults.
+		auto chargedClocks=
+		    (unsigned long long int)clocksPassed*var.cpuClockScalePercent/100
+		    +mem.TakeBusWaitClocks();
+		state.clockBalance+=chargedClocks*1000;
 
 		// Since last update, clockBalance*1000/freq nano seconds have passed.
 		// Eg.  66MHz ->  66 clocks passed means 1 micro second.

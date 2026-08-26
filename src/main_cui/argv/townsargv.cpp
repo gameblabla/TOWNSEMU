@@ -93,6 +93,22 @@ void TownsARGV::PrintHelp(void) const
 	std::cout << "  Specify CPU frequency when set to SLOW mode in Megahertz." << std::endl;
 	std::cout << "  Some FM TOWNS models (confirmed 2F) sets machine in SLOW mode" << std::endl;
 	std::cout << "  in the boot ROM." << std::endl;
+	std::cout << "-CPUCLOCKSCALE percent" << std::endl;
+	std::cout << "  Scale the clock count the CPU core charges per instruction." << std::endl;
+	std::cout << "  The core is a 486 whatever -TOWNSTYPE says.  A 386 needs roughly" << std::endl;
+	std::cout << "  2 to 3 times as many clocks for the same code, so 250 turns a" << std::endl;
+	std::cout << "  -TOWNSTYPE MARTY -FREQ 16 run into something like a real Marty." << std::endl;
+	std::cout << "  100 (the default) leaves timing exactly as it was." << std::endl;
+	std::cout << "-BUSWAIT clocks / -VRAMBUSWAIT clocks" << std::endl;
+	std::cout << "  Clocks charged per data bus cycle to main RAM / to VRAM, on top" << std::endl;
+	std::cout << "  of the 5E0H/5E2H/5E6H wait-state registers.  Tsugaru otherwise" << std::endl;
+	std::cout << "  models memory as zero-wait, so it cannot show the cost of a" << std::endl;
+	std::cout << "  full-screen VRAM blit on a machine that has no cache." << std::endl;
+	std::cout << "  Any non-default -CPUCLOCKSCALE/-BUSWAIT/-VRAMBUSWAIT turns the" << std::endl;
+	std::cout << "  whole model on; all three at their defaults leave it off." << std::endl;
+	std::cout << "-DATABUSWIDTH 16|32" << std::endl;
+	std::cout << "  Data bus width for the wait model -- a dword access costs two" << std::endl;
+	std::cout << "  bus cycles on 16.  Default follows the machine (16 on 386SX)." << std::endl;
 	std::cout << "-USEFPU / -DONTUSEFPU" << std::endl;
 	std::cout << "  Use or do not use floating-point unit." << std::endl;
 	std::cout << "-MEMSIZE memory_size_in_MB" << std::endl;
@@ -616,6 +632,26 @@ bool TownsARGV::AnalyzeCommandParameter(int argc,char *argv[])
 		else if("-SLOWMODEFREQ"==ARG && i+1<argc)
 		{
 			slowModeFreq=cpputil::Atoi(argv[i+1]);
+			++i;
+		}
+		else if("-CPUCLOCKSCALE"==ARG && i+1<argc)
+		{
+			cpuClockScalePercent=cpputil::Atoi(argv[i+1]);
+			++i;
+		}
+		else if("-BUSWAIT"==ARG && i+1<argc)
+		{
+			busWaitClocks=cpputil::Atoi(argv[i+1]);
+			++i;
+		}
+		else if("-VRAMBUSWAIT"==ARG && i+1<argc)
+		{
+			VRAMBusWaitClocks=cpputil::Atoi(argv[i+1]);
+			++i;
+		}
+		else if("-DATABUSWIDTH"==ARG && i+1<argc)
+		{
+			dataBusWidth=cpputil::Atoi(argv[i+1]);
 			++i;
 		}
 		else if("-USEFPU"==ARG)

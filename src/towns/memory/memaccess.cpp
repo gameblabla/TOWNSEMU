@@ -83,6 +83,10 @@ void TownsMemAccess::SetCPUPointer(class i486DXCommon *cpuPtr)
 /* virtual */ MemoryAccess::MemoryWindow TownsMainRAMAccess::GetMemoryWindow(unsigned int physAddr)
 {
 	MemoryAccess::MemoryWindow memWin;
+	if(true==refuseMemoryWindow)
+	{
+		return memWin; // ptr stays null -- see the member's comment.
+	}
 	memWin.ptr=physMemPtr->state.RAM.data()+(physAddr&(~0xfff));
 	return memWin;
 }
@@ -519,6 +523,34 @@ TownsFMRVRAMAccess::TownsFMRVRAMAccess()
 
 ////////////////////////////////////////////////////////////
 
+// Where a physical address in one of the old-style memory-card windows lands
+// in the card image.
+//
+// The two windows are not the same size.  A 386DX-class machine sees 16MB of
+// the card at C0000000H and needs no banking for a card that fits in it, but a
+// 386SX (FM TOWNS UX, and Marty) only has a 1MB window at 00D00000H, and the
+// rest of the card is reached by selecting a 1MB bank through I/O 490H - which
+// is why the bank register is a 6-bit value on the 386SX and a 2-bit one
+// elsewhere (see TOWNSIO_MEMCARD_BANK in physmem.cpp).  Without applying it
+// here, only the first megabyte of a JEIDA4 card was ever visible on a 386SX,
+// and a card larger than that would read its first megabyte over and over.
+//
+// JEIDA3/SRAM cards predate banking and are left unbanked, as they were.
+static unsigned int OldMemCardAddress(const TownsPhysicalMemory::State &state,unsigned int physAddr)
+{
+	if(0xC0000000<=physAddr)
+	{
+		// Looks like first 16MB of JEIDA4 memory card is also accessible from C0000000h
+		return physAddr&TOWNSADDR_MEMCARD_AND;
+	}
+	unsigned int memCardAddr=physAddr&TOWNSADDR_386SX_MEMCARD_AND;
+	if(TOWNS_MEMCARD_TYPE_JEIDA4==state.memCard.memCardType)
+	{
+		memCardAddr+=0x100000*state.memCardBank;
+	}
+	return memCardAddr;
+}
+
 /* virtual */ unsigned int TownsOldMemCardAccess::FetchByte(unsigned int physAddr) const
 {
 	// DISKBIOS (INT 93H AX=??50H) reads C0000000H for CIS information.
@@ -530,16 +562,7 @@ TownsFMRVRAMAccess::TownsFMRVRAMAccess()
 
 	auto &memCard=physMemPtr->state.memCard;
 
-	// Looks like first 16MB of JEIDA4 memory card is also accessible from C0000000h
-	unsigned int memCardAddr=physAddr;
-	if(0xC0000000<=physAddr)
-	{
-		memCardAddr&=TOWNSADDR_MEMCARD_AND;
-	}
-	else
-	{
-		memCardAddr&=TOWNSADDR_386SX_MEMCARD_AND;
-	}
+	unsigned int memCardAddr=OldMemCardAddress(physMemPtr->state,physAddr);
 	if(memCardAddr<memCard.data.size())
 	{
 		townsPtr->NotifyDiskRead();
@@ -553,19 +576,10 @@ TownsFMRVRAMAccess::TownsFMRVRAMAccess()
 	{
 		townsPtr->NotifyDiskRead();
 
-		// Looks like first 16MB of JEIDA4 memory card is also accessible from C0000000h
 		auto &memCard=physMemPtr->state.memCard;
 		if(true!=memCard.writeProtected)
 		{
-			unsigned int memCardAddr=physAddr;
-			if(0xC0000000<=physAddr)
-			{
-				memCardAddr&=TOWNSADDR_MEMCARD_AND;
-			}
-			else
-			{
-				memCardAddr&=TOWNSADDR_386SX_MEMCARD_AND;
-			}
+			unsigned int memCardAddr=OldMemCardAddress(physMemPtr->state,physAddr);
 			if(memCardAddr<memCard.data.size())
 			{
 				memCard.data[memCardAddr]=data;

@@ -49,6 +49,18 @@ public:
 class TownsMainRAMAccess : public TownsMemAccess
 {
 public:
+	/*! Set while Memory's bus-timing model is on.  GetMemoryWindow() is the
+	    direct-pointer fast path i486DXFidelityLayer::GetOperandPointer()
+	    takes for main-RAM operands, and it bypasses Memory's Fetch and
+	    Store functions entirely -- so with it in place a main-RAM wait
+	    state would be charged for nothing but string instructions.
+	    Refusing the window routes ordinary loads and stores back through
+	    the counted path.
+	    GetConstMemoryWindow() is deliberately left alone: that is
+	    instruction prefetch, which overlaps execution on real hardware.
+	*/
+	bool refuseMemoryWindow=false;
+
 	virtual unsigned int FetchByte(unsigned int physAddr) const;
 	virtual unsigned int FetchWord(unsigned int physAddr) const;
 	virtual unsigned int FetchDword(unsigned int physAddr) const;

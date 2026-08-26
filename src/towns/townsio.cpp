@@ -360,4 +360,36 @@ void FMTownsCommon::AdjustMachineSpeedForMemoryWait(void)
 		state.currentFreq=var.slowModeFreq;
 		sprite.state.transferTime=TownsSprite::SPRITE_ONE_TRANSFER_TIME;
 	}
+	UpdateBusWaitStates();
+}
+
+void FMTownsCommon::UpdateBusWaitStates(void)
+{
+	if(true!=mem.BusTimingModelEnabled())
+	{
+		return;
+	}
+
+	// -BUSWAIT/-VRAMBUSWAIT are the floor: what a bus cycle to that kind of
+	// memory costs on this machine even with the wait-state registers
+	// programmed to zero (a 386 bus cycle is two clocks where the 486 core
+	// charged about one, and VRAM sits behind CRTC refresh arbitration on
+	// top of that).  The 5E0H/5E2H/5E6H registers -- and 5ECH's FAST/SLOW
+	// switch, which writes 0 or 6 to both -- add to it, which is what makes
+	// a program's own wait-state setup visible in a profile.
+	const unsigned int RAMWait=var.busWaitClocks+(unsigned int)state.mainRAMWait;
+	const unsigned int VRAMWait=var.VRAMBusWaitClocks+(unsigned int)state.VRAMWait;
+
+	// Order matters: the narrow-map windows below sit inside the low
+	// megabyte that the first call paints, and must overwrite it.
+	mem.SetBusWaitClocks(0,0x45FFFFFF,RAMWait);
+
+	mem.SetBusWaitClocks(TOWNSADDR_FMR_VRAM_BASE,TOWNSADDR_FMR_VRAM_CVRAM_FONT_END-1,VRAMWait);
+
+	mem.SetBusWaitClocks(TOWNSADDR_386SX_VRAM0_BASE,TOWNSADDR_386SX_VRAM1_END-1,VRAMWait);
+	mem.SetBusWaitClocks(TOWNSADDR_386SX_SPRITERAM_BASE,TOWNSADDR_386SX_SPRITERAM_END-1,VRAMWait);
+
+	mem.SetBusWaitClocks(TOWNSADDR_VRAM0_BASE,TOWNSADDR_VRAM1_END-1,VRAMWait);
+	mem.SetBusWaitClocks(TOWNSADDR_SPRITERAM_BASE,TOWNSADDR_SPRITERAM_END-1,VRAMWait);
+	mem.SetBusWaitClocks(TOWNSADDR_VRAM_HIGHRES0_BASE,TOWNSADDR_VRAM_HIGHRES2_END-1,VRAMWait);
 }

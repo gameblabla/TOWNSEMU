@@ -211,6 +211,18 @@ void FMTownsCommon::State::PowerOn(void)
 	{
 		towns.var.slowModeFreq=argv.slowModeFreq;
 	}
+	if(100!=argv.cpuClockScalePercent || 0!=argv.busWaitClocks || 0!=argv.VRAMBusWaitClocks)
+	{
+		// -CPU386 without an explicit data bus width follows the machine ID:
+		// Marty and the UX are 386SX (16-bit), everything else 32-bit.
+		auto busWidth=argv.dataBusWidth;
+		if(0==busWidth)
+		{
+			busWidth=(TOWNSCPU_80386SX==towns.TownsTypeToCPUType(argv.townsType) ? 16 : 32);
+		}
+		towns.EnableCPU386TimingModel(busWidth,argv.cpuClockScalePercent,
+		                              argv.busWaitClocks,argv.VRAMBusWaitClocks);
+	}
 	towns.CPU().state.fpuState.enabled=argv.useFPU;
 
 	if(0!=argv.memSizeInMB)
@@ -1423,6 +1435,22 @@ void FMTownsCommon::SetUpVRAMAccess(bool breakOnRead,bool breakOnWrite)
 bool FMTownsCommon::FASTModeLamp(void) const
 {
 	return (0==state.mainRAMWait && state.VRAMWait<3);
+}
+
+void FMTownsCommon::EnableCPU386TimingModel(unsigned int dataBusWidth,unsigned int clockScalePercent,
+                                            unsigned int RAMWait,unsigned int VRAMWait)
+{
+	var.cpuClockScalePercent=(0<clockScalePercent ? clockScalePercent : 100);
+	var.busWaitClocks=RAMWait;
+	var.VRAMBusWaitClocks=VRAMWait;
+
+	mem.EnableBusTimingModel(16==dataBusWidth ? 2 : 1);
+
+	// Ordinary main-RAM loads and stores otherwise take a direct-pointer
+	// path that never reaches Memory, and would be charged nothing.
+	physMem.mainRAMAccess.refuseMemoryWindow=true;
+
+	UpdateBusWaitStates();
 }
 
 void FMTownsCommon::SetMainRAMSize(long long int size)

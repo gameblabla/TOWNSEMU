@@ -257,6 +257,32 @@ private:
 		GRANURALITY_SHIFT=12,  // 4KB slot.
 	};
 
+	/*! Bus-timing model.  Tsugaru's CPU core is a 486 with a flat one-clock
+	    memory system: the only speed control is state.currentFreq, and
+	    mainRAMWait/VRAMWait do nothing but flip between two frequencies.
+	    That makes it useless as a proxy for a cacheless 80386SX behind a
+	    16-bit bus (Marty, UX), where a VRAM store costs several times what
+	    a register operation does, and where the whole point of an
+	    optimisation may be to move bytes out of VRAM into main RAM.
+
+	    When busWaitClockPtr is non-null, every data access through this
+	    class adds busWaitClockPtr[slot] clocks per bus cycle to
+	    busWaitClocks, which FMTownsCommon::RunOneInstruction() charges to
+	    the machine clock on top of the 486 core's own count.  A dword
+	    access costs dwordBusCycles bus cycles (2 on a 16-bit bus), a
+	    word or byte access one.
+
+	    Instruction fetch deliberately does NOT go through here -- it uses
+	    the const memory window, which stays a direct pointer -- because
+	    prefetch on real hardware overlaps execution.  The cost of running
+	    386 code rather than 486 code is modelled separately, as a scale
+	    factor on the core's clock count (FMTownsCommon var.cpuClockScale).
+	*/
+	std::vector <unsigned char> busWaitClockTable;
+	const unsigned char *busWaitClockPtr=nullptr;
+	unsigned int dwordBusCycles=1;
+	mutable unsigned long long int busWaitClocks=0;
+
 public:
 	enum
 	{
@@ -264,6 +290,41 @@ public:
 	};
 
 	Memory();
+
+	/*! Turn the bus-timing model on.  dwordBusCycles is 1 for a 32-bit
+	    data bus and 2 for the 386SX's 16-bit one.  All slots start at zero
+	    wait; use SetBusWaitClocks to give a region a cost.
+	*/
+	void EnableBusTimingModel(unsigned int dwordBusCycles);
+
+	bool BusTimingModelEnabled(void) const
+	{
+		return nullptr!=busWaitClockPtr;
+	}
+
+	/*! Wait clocks charged per bus cycle for physical addresses
+	    physAddrLow..physAddrHigh.  No-op unless the model is enabled.
+	*/
+	void SetBusWaitClocks(unsigned int physAddrLow,unsigned int physAddrHigh,unsigned int clocks);
+
+	/*! Wait clocks accumulated since the last call, and reset. */
+	inline unsigned long long int TakeBusWaitClocks(void) const
+	{
+		auto t=busWaitClocks;
+		busWaitClocks=0;
+		return t;
+	}
+
+private:
+	inline void ChargeBus(unsigned int physAddr,unsigned int busCycles) const
+	{
+		if(nullptr!=busWaitClockPtr)
+		{
+			busWaitClocks+=busWaitClockPtr[physAddr>>GRANURALITY_SHIFT]*busCycles;
+		}
+	}
+
+public:
 
 	/*! Unassign all memory access objects.
 	*/
@@ -293,18 +354,21 @@ public:
 
 	inline unsigned int FetchByte(unsigned int physAddr) const
 	{
+		ChargeBus(physAddr,1);
 		auto memAccess=memAccessPtr[physAddr>>GRANURALITY_SHIFT];
 		return memAccess->FetchByte(physAddr);
 	}
 
 	inline unsigned int FetchWord(unsigned int physAddr) const
 	{
+		ChargeBus(physAddr,1);
 		auto memAccess=memAccessPtr[physAddr>>GRANURALITY_SHIFT];
 		return memAccess->FetchWord(physAddr);
 	}
 
 	inline unsigned int FetchDword(unsigned int physAddr) const
 	{
+		ChargeBus(physAddr,dwordBusCycles);
 		auto memAccess=memAccessPtr[physAddr>>GRANURALITY_SHIFT];
 		return memAccess->FetchDword(physAddr);
 	}
@@ -322,6 +386,7 @@ public:
 
 	inline void StoreByte(unsigned int physAddr,unsigned char data)
 	{
+		ChargeBus(physAddr,1);
 		auto memAccess=memAccessPtr[physAddr>>GRANURALITY_SHIFT];
 		memAccess->StoreByte(physAddr,data);
 	}
@@ -340,12 +405,14 @@ public:
 
 	inline void StoreWord(unsigned int physAddr,unsigned int data)
 	{
+		ChargeBus(physAddr,1);
 		auto memAccess=memAccessPtr[physAddr>>GRANURALITY_SHIFT];
 		memAccess->StoreWord(physAddr,data);
 	}
 
 	inline void StoreDword(unsigned int physAddr,unsigned int data)
 	{
+		ChargeBus(physAddr,dwordBusCycles);
 		auto memAccess=memAccessPtr[physAddr>>GRANURALITY_SHIFT];
 		memAccess->StoreDword(physAddr,data);
 	}
