@@ -20,6 +20,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 #include "sound.h"
 #include "towns.h"
 #include "outside_world.h"
+#include "cdrom.h"
 
 
 
@@ -416,17 +417,27 @@ inline bool TownsSound::IsHighResPCMPlaying(void) const
 
 void TownsSound::ProcessSound(void)
 {
-	if((true==IsFMPlaying() ||
-	    true==IsPCMPlaying() ||
-	    true==IsPCMRecording() ||
-	    true==IsHighResPCMPlaying() ||
-	    true==cdrom->CDDAIsPlaying() ||
-	    true==scsi->CDDAIsPlaying() ||
-	    townsPtr->state.townsTime<lastFMPCMWaveGenTime+RINGBUFFER_CLEAR_TIME) &&
-	    nullptr!=outside_world)
+	if(nullptr!=outside_world)
+	{
+		// Drain staged PCM before backpressure checks so pending_pcm_ cannot wedge synthesis.
+		outside_world->SyncPcmContract(townsPtr->state.townsTime);
+	}
+
+	const bool sourcePlaying=(true==IsFMPlaying() ||
+	                          true==IsPCMPlaying() ||
+	                          true==IsPCMRecording() ||
+	                          true==IsHighResPCMPlaying() ||
+	                          true==cdrom->CDDAAudioShouldOutput() ||
+	                          true==scsi->CDDAIsPlaying());
+	const bool withinClearWindow=(townsPtr->state.townsTime<lastFMPCMActivityTime+RINGBUFFER_CLEAR_TIME);
+	const bool ym2612WarmKeepalive=(nullptr!=outside_world && true!=sourcePlaying && true!=withinClearWindow);
+
+	if((true==sourcePlaying || true==withinClearWindow || true==ym2612WarmKeepalive) &&
+	   nullptr!=outside_world)
 	{
 		const unsigned int WAVE_OUT_SAMPLING_RATE=YM2612::WAVE_SAMPLING_RATE; // Align with YM2612.
 		const uint32_t numSamplesPerWave=FM_PCM_MILLISEC_PER_WAVE*WAVE_OUT_SAMPLING_RATE/1000;
+		const size_t waveBytes=static_cast<size_t>(numSamplesPerWave)*4u;
 		const uint64_t segmentTimeInNS=(uint64_t)numSamplesPerWave*1000000000ull/WAVE_OUT_SAMPLING_RATE;
 
 		// The wave segment clock.  A segment is always numSamplesPerWave
@@ -474,11 +485,24 @@ void TownsSound::ProcessSound(void)
 		if(true==nextFMPCMWave.empty() &&
 		   lastFMPCMWaveGenTime+segmentTimeInNS<=townsPtr->state.townsTime)
 		{
-			nextFMPCMWave.resize(numSamplesPerWave*4);
+			auto EnsureMuteScratch=[&](void)->unsigned char *
+			{
+				if(var.muteScratchWave.size()<waveBytes)
+				{
+					var.muteScratchWave.resize(waveBytes);
+				}
+				return var.muteScratchWave.data();
+			};
+
+			nextFMPCMWave.resize(waveBytes);
 			memset(nextFMPCMWave.data(),0,nextFMPCMWave.size());
 
 			state.ym2612.waveGenEndTime=lastFMPCMWaveGenTime+segmentTimeInNS;
 
+			bool wavGenerated=false;
+			bool realSourceWave=false;
+			if(true==sourcePlaying || true==withinClearWindow)
+			{
 			if(true==IsFMPlaying())
 			{
 				// Per the FM TOWNS Technical Databook (Table I-5-42/I-5-43):
@@ -496,15 +520,13 @@ void TownsSound::ProcessSound(void)
 				else
 				{
 					// Even when YM2612 is muted, it needs to MakeWaveForNSamples because it does update time-dependent state variables.
-					std::vector <unsigned char> dummy;
-					dummy.resize(numSamplesPerWave*4);
-					state.ym2612.MakeWaveForNSamples(dummy.data(),numSamplesPerWave,lastFMPCMWaveGenTime);
+					state.ym2612.MakeWaveForNSamples(EnsureMuteScratch(),numSamplesPerWave,lastFMPCMWaveGenTime);
 				}
+				wavGenerated=true;
+				realSourceWave=true;
 			}
 			if(true==IsPCMPlaying())
 			{
-				const unsigned int WAVE_OUT_SAMPLING_RATE=YM2612::WAVE_SAMPLING_RATE; // Align with YM2612.
-
 				// Brandish expects PCM interrupt even when muted.
 				// Therefore, PCM wave must be generated and played for making IRQ.
 				// See the FM case just above - bit set means "not muted".
@@ -515,9 +537,7 @@ void TownsSound::ProcessSound(void)
 				else
 				{
 					// AddWaveForNumSamples will set IRQAfterThisPlayBack flag.
-					std::vector <unsigned char> dummy;
-					dummy.resize(numSamplesPerWave*4);
-					state.rf5c68.AddWaveForNumSamples(dummy.data(),numSamplesPerWave,WAVE_OUT_SAMPLING_RATE,lastFMPCMWaveGenTime);
+					state.rf5c68.AddWaveForNumSamples(EnsureMuteScratch(),numSamplesPerWave,WAVE_OUT_SAMPLING_RATE,lastFMPCMWaveGenTime);
 				}
 
 				for(unsigned int chNum=0; chNum<RF5C68::NUM_CHANNELS; ++chNum)
@@ -529,6 +549,8 @@ void TownsSound::ProcessSound(void)
 						ch.IRQAfterThisPlayBack=false;
 					}
 				}
+				wavGenerated=true;
+				realSourceWave=true;
 			}
 			if(true==IsHighResPCMPlaying())
 			{
@@ -541,14 +563,20 @@ void TownsSound::ProcessSound(void)
 				{
 					highResPCM.AddWaveForNumSamples(nextFMPCMWave.data(),numSamplesPerWave,WAVE_OUT_SAMPLING_RATE);
 				}
+				wavGenerated=true;
+				realSourceWave=true;
 			}
-			if(true==cdrom->CDDAIsPlaying() && 0!=(state.audioFlag&64))
+			if(true==cdrom->CDDAAudioShouldOutput() && 0!=(state.audioFlag&64))
 			{
 				cdrom->AddWaveForNumSamples(nextFMPCMWave.data(),numSamplesPerWave,WAVE_OUT_SAMPLING_RATE);
+				wavGenerated=true;
+				realSourceWave=true;
 			}
 			if(true==scsi->CDDAIsPlaying())
 			{
 				scsi->AddWaveForNumSamples(nextFMPCMWave.data(),numSamplesPerWave,WAVE_OUT_SAMPLING_RATE);
+				wavGenerated=true;
+				realSourceWave=true;
 			}
 			if(true==IsPCMRecording())
 			{
@@ -586,12 +614,33 @@ void TownsSound::ProcessSound(void)
 						balance-=YM2612::WAVE_SAMPLING_RATE;
 					}
 				}
+				wavGenerated=true;
+				realSourceWave=true;
+			}
+			}
+			if(true==ym2612WarmKeepalive)
+			{
+				// Keep YM2612's time-dependent state advancing while nothing
+				// is playing so a future playback does not start on stale state.
+				state.ym2612.MakeWaveForNSamples(EnsureMuteScratch(),numSamplesPerWave,lastFMPCMWaveGenTime);
+				wavGenerated=true;
 			}
 			// Unconditionally, including when nothing was playing and
 			// the segment is silence: it still represents this much VM
 			// time, and not advancing would leave the gate above
 			// permanently open, spinning out silent segments.
-			lastFMPCMWaveGenTime+=segmentTimeInNS;
+			if(true==wavGenerated)
+			{
+				lastFMPCMWaveGenTime+=segmentTimeInNS;
+				if(true==realSourceWave)
+				{
+					lastFMPCMActivityTime=townsPtr->state.townsTime;
+				}
+			}
+			else
+			{
+				lastFMPCMWaveGenTime+=segmentTimeInNS;
+			}
 		}
 	}
 
@@ -601,7 +650,6 @@ void TownsSound::ProcessSound(void)
 		int rightOut=cpputil::GetSignedWord(nextFMPCMWave.data()+2);
 		state.lastAudioOut=(leftOut+rightOut)/2;
 
-		// Hopefully FMPCM channel finishes play back previous wave piece before nextFMPCMWaveGenTime.
 		if(true==recordFMandPCM)
 		{
 			FMPCMrecording.insert(FMPCMrecording.end(),nextFMPCMWave.begin(),nextFMPCMWave.end());
@@ -610,6 +658,8 @@ void TownsSound::ProcessSound(void)
 		nextFMPCMWave.clear(); // It was supposed to be cleared in FMPlay.  Just in case.
 		state.ym2612.CheckToneDoneAllChannels();
 	}
+
+	outside_world->SyncPcmContract(townsPtr->state.townsTime);
 
 	if (townsPtr->timer.IsBuzzerPlaying()) {
 		if (!outside_world->BeepChannelPlaying()) {
@@ -638,6 +688,7 @@ void TownsSound::ProcessSilence(void)
 		memset(silence.data(),0,silence.size());
 		outside_world->BeepPlay(BUZZER_SAMPLING_RATE,silence);
 	}
+	outside_world->SyncPcmContract(townsPtr->state.townsTime);
 }
 
 bool TownsSound::LoadWav(std::string fName)

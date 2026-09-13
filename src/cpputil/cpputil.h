@@ -31,6 +31,10 @@ std::vector <unsigned char> ReadBinaryFile(std::string fName);
 std::vector <unsigned char> ReadBinaryFile(std::string fName,long long int start,long long int length);
 bool WriteBinaryFile(const std::string &fName,unsigned long long length,const unsigned char dat[]);
 bool WriteBinaryFile(const std::string &fName,unsigned long long int start,unsigned long long length,const unsigned char dat[]);
+/*! Create a sparse-capable raw image of the given byte size (logical size only). */
+bool CreateSparseBinaryFile(const std::string &fName,unsigned long long size);
+/*! Punch holes in all-zero regions so an existing dense image uses less disk space. */
+bool CompactBinaryFileToSparse(const std::string &fName);
 std::vector <std::string> ReadTextFile(std::string fName);
 bool WriteTextFile(std::string fName,const std::vector <std::string> &text);
 std::vector <std::string> Parser(const std::string &str);
@@ -82,6 +86,8 @@ std::string MakeRelativePath(std::string fName,std::string relativeToThisDir);
 void SimplifyPath(std::string &path);
 
 long long int FileSize(const std::string &fName);
+/*! Bytes allocated on disk (sparse holes count as 0). Falls back to FileSize when unknown. */
+long long int AllocatedFileBytes(const std::string &fName);
 
 
 char BoolToChar(bool f);
@@ -451,6 +457,12 @@ std::string ExpandFileName(std::string src,const std::map <std::string,std::stri
 inline void Toggle(bool &flag){flag=(flag==false);}
 
 inline std::string BoolToOnOffStr(bool flag){return (flag ? "ON" : "OFF");}
+
+/*! Leftover device debug (gamepad discovery, CRTC-HST write, RS232 Tx echo).
+    Enabled by TSUGARU_DEBUG=1, or by -VERBOSE (which sets that env var).
+*/
+bool DebugLogEnabled(void);
+void EnableDebugLog(void);
 };
 
 

@@ -25,6 +25,7 @@ bool FMTownsCommon::SaveState(std::string fName) const
 			ofp.write((char *)&len,4);
 			ofp.write((char *)dat.data(),len);
 		}
+		ofp.flush();
 		return true;
 	}
 	return false;
@@ -214,8 +215,35 @@ void FMTownsCommon::LoadStatePostProcess(void)
 		}
 	}
 
+	// Drop previous-session host CDDA wave + bridge/grace flags, then rebuild from
+	// the restored guest position if PLAYING/PAUSED. Must not call DiscardCDDAWaveCache
+	// here: that would wipe play pointer / base time restored by SpecificDeserialize.
+	cdrom.DiscardHostCDDACacheForStateLoad();
 	cdrom.ResumeCDDAAfterRestore();
 	scsi.ResumeCDDAAfterRestore();
+
+	// Save states do not include host-side app-exec tracking; re-sync profile + apply.
+	if(true==var.useDiscProfiles)
+	{
+		const std::string &disc=cdrom.state.GetDisc().fName;
+		if(true!=disc.empty())
+		{
+			mouseCoordWriteScan.TryLoadForDisc(disc);
+			mouseCoordWriteScan.SyncAfterStateLoad();
+		}
+	}
+
+	// Save states may have been taken without a MIDI board; honor machine config.
+	midi.EnableCards(var.configuredMidiCards);
+
+	// Force a capture soon, and publish townsTime so host present queues are not
+	// gated on a pre-load observer clock (TownsQt PresentOneDueFrame vsync_index).
+	state.nextRenderingTime=state.townsTime;
+	PublishObserverTownsTime();
+
+	crtc.RepairCorruptDisplayState();
+
+	AdjustMachineSpeedForMemoryWait();
 
 	var.justLoadedState=true;
 }

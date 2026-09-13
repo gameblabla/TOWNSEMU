@@ -75,12 +75,25 @@ public:
 	bool highResAvailable=true;
 
 	bool highResPCM=true;
+
+	/*! UG-generation peripheral I/O (CPU_MISC3 / SCSI word transfer), independent of Machine ID.
+	    TownsQt sets this from SYS ROM version (TownsOS L20+ era ≈ UG/HR/HG/UR and later). */
+	bool ugGenerationIO=false;
+
 	int nMidiCards=0;
 
 	bool catchUpRealTime=true;
 
 	bool damperWireLine=true;
 	bool scanLineEffectIn15KHz=false;
+
+	enum
+	{
+		SPRITE_TRANSFER_AUTO=0,
+		SPRITE_TRANSFER_HALF=1,
+		SPRITE_TRANSFER_UNLIMITED=2, // transferTime=0; sprite index cap remains 1024
+	};
+	unsigned int spriteTransferMode=SPRITE_TRANSFER_AUTO;
 
 	bool removeInternalCD=false;
 

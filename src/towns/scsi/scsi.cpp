@@ -189,6 +189,11 @@ TownsSCSI::TownsSCSI(class FMTownsCommon *townsPtr) : Device(townsPtr)
 	{
 		n=0;
 	}
+	for(auto &b : breakOnSCSICommand)
+	{
+		b=false;
+	}
+	breakOnDMATransfer=false;
 	commandLength[SCSICMD_TEST_UNIT_READY]=6;
 	commandLength[SCSICMD_REZERO_UNIT]    =6;
 	commandLength[SCSICMD_SENSE]          =6;
@@ -573,7 +578,7 @@ void TownsSCSI::EnterStatusPhaseWithoutFollowingMessageIn(void)
 		}
 		break;
 	case TOWNSIO_SCSI_WORD_TFR_AVAIL: // 0xC34, [2] pp.801
-		if(TOWNSTYPE_2_UG<=townsPtr->townsType)
+		if(TOWNSTYPE_2_UG<=townsPtr->townsType || true==townsPtr->ugGenerationIO)
 		{
 			return 0x7F;  // If UG or newer, indicate word-transfer is available.
 		}
@@ -1616,14 +1621,22 @@ void TownsSCSI::AddWaveForNumSamples(unsigned char waveBuf[],unsigned int numSam
 		// }
 		// else
 		{
+			const float userGain=townsPtr->sound.GetCDDAUserGain();
 			uint64_t writePtr=0;
 			for(uint64_t i=0; i<numSamples && d.CDDAPlayPointer+3<CDDAWaveSize; ++i)
 			{
 				int L=cpputil::GetSignedWord(waveBuf+writePtr);
 				int R=cpputil::GetSignedWord(waveBuf+writePtr+2);
 
-				L+=cpputil::GetSignedWord(d.CDDAWave.data()+d.CDDAPlayPointer);
-				R+=cpputil::GetSignedWord(d.CDDAWave.data()+d.CDDAPlayPointer+2);
+				int Lcd=cpputil::GetSignedWord(d.CDDAWave.data()+d.CDDAPlayPointer);
+				int Rcd=cpputil::GetSignedWord(d.CDDAWave.data()+d.CDDAPlayPointer+2);
+				if(1.0f!=userGain)
+				{
+					Lcd=static_cast<int>(Lcd*userGain);
+					Rcd=static_cast<int>(Rcd*userGain);
+				}
+				L+=Lcd;
+				R+=Rcd;
 
 				L=std::max(std::min(L,32767),-32767);
 				R=std::max(std::min(R,32767),-32767);
@@ -1647,7 +1660,13 @@ void TownsSCSI::ResumeCDDAAfterRestore(void)
 {
 	for(auto &d : state.dev)
 	{
-		if(SCSIDEVICE_CDROM==d.devType && (CDDA_PLAYING==d.CDDAState || CDDA_PAUSED==d.CDDAState))
+		if(SCSIDEVICE_CDROM!=d.devType)
+		{
+			continue;
+		}
+		// Drop previous-session host wave; rebuild only when the state is playing/paused.
+		d.CDDAWave.clear();
+		if(CDDA_PLAYING==d.CDDAState || CDDA_PAUSED==d.CDDAState)
 		{
 			d.CDDAWave=d.discImg.GetWave(d.CDDABeginTime,d.CDDAEndTime);
 			// state.CDDAPlayPointer should have already been set.

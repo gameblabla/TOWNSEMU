@@ -21,6 +21,8 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 #include <thread>
 #include <mutex>
 #include <memory>
+#include <atomic>
+#include <functional>
 
 #include "towns.h"
 #include "outside_world.h"
@@ -32,6 +34,8 @@ private:
 	FMTownsCommon *townsPtr;
 	int runMode=RUNMODE_PAUSE;
 	bool returnOnPause=false;
+	std::atomic<bool> hostPauseAcknowledged_{false};
+	std::function<void(FMTownsCommon &)> onPauseTick_;
 
 	// This will be used for virtually slwoing down CPU when VM is lagging.
 	long long int timeDeficit=0;
@@ -43,10 +47,14 @@ private:
 	};
 	unsigned int renderTiming=RENDER_TIMING_OUTSIDE_VSYNC;
 
-public:
+	public:
 	enum
 	{
-		NANOSECONDS_PER_TIME_SYNC=    1000000, // 1ms
+#if defined(TOWNSQT_SMOOTH_TIMING)
+		NANOSECONDS_PER_TIME_SYNC=1000000, // 1ms — TownsQt pacing slice
+#else
+		NANOSECONDS_PER_TIME_SYNC=1000000, // 1ms
+#endif
 		TIME_DEFICIT_PAYBACK_PER_INSTRUCTION= 1000, // 1us
 	};
 
@@ -70,7 +78,7 @@ private:
 
 	template <class FMTownsClass>
 	void VMMainLoopTemplate(FMTownsClass *townsPtr,Outside_World *outside_world,Outside_World::Sound *sound,Outside_World::WindowInterface *window,class TownsUIThread *uiThread);
-	void AdjustRealTime(FMTownsCommon *townsPtr,long long int cpuTimePassed,std::chrono::time_point<std::chrono::high_resolution_clock> time0,Outside_World *outside_world);
+	void AdjustRealTime(FMTownsCommon *townsPtr,long long int cpuTimePassed,std::chrono::time_point<std::chrono::steady_clock> time0,Outside_World *outside_world,Outside_World::Sound *sound);
 
 public:
 
@@ -87,6 +95,15 @@ public:
 	/*! If true, VMMainLoop will return when VM is paused.
 	*/
 	void SetReturnOnPause(bool flag);
+
+	/*! Host-side state save: called from RUNMODE_PAUSE on the VM thread. */
+	void SetOnPauseTick(std::function<void(FMTownsCommon &)> fn);
+
+	/*! Wait until the VM loop is executing its RUNMODE_PAUSE body (safe host state-save window). */
+	bool WaitForHostPauseAcknowledged(int timeoutMs=2000) const;
+
+	/*! Clear a stale pause-ack so the next RUNMODE_PAUSE entry can be observed. */
+	void ClearHostPauseAcknowledged(void);
 
 	void PrintStatus(const FMTownsCommon &towns) const;
 };

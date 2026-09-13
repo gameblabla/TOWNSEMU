@@ -19,6 +19,8 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 #include <vector>
 #include <string>
 #include <map>
+#include <atomic>
+#include <memory>
 
 #include "lineparser.h"
 
@@ -57,6 +59,8 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 #include "eventlog.h"
 
 #include "outside_world.h"
+#include "mos_coord_probe.h"
+#include "mouse_coord_write_scan.h"
 
 
 
@@ -78,7 +82,7 @@ public:
 	enum
 	{
 		FREQUENCY_DEFAULT=25,                // MHz
-		FREQUENCY_SLOWMODE_DEFAULT=5,        // MHz
+		FREQUENCY_SLOWMODE_DEFAULT=16,       // MHz (Compatible / non-FAST mode)
 		FAST_DEVICE_POLLING_INTERVAL=10000,  // Nano-seconds
 		DEVICE_POLLING_INTERVAL=   8000000,  // 8ms
 
@@ -102,6 +106,9 @@ public:
 		    I think 64-bit is long enough.  So, I make it signed int.
 		*/
 		long long int townsTime;
+
+		/*! Published once per VM time-sync slice for GUI/audio observers (nanoseconds). */
+		std::atomic<uint64_t> observerTownsTimeNs{0};
 
 		int64_t nextDevicePollingTime=0;
 
@@ -192,6 +199,8 @@ public:
 		*/
 		unsigned int tbiosVersion=TBIOS_UNKNOWN;
 		bool mouseBIOSActive=false;
+		/*! Incremented on Mouse BIOS AH=00 (start/re-init).  Used to detect TOS desktop return. */
+		unsigned int mouseBIOSStartSerial=0;
 		int mouseDisplayPage=0;
 		unsigned int TBIOS_physicalAddr=0;
 		unsigned int TBIOS_mouseInfoOffset=0;
@@ -199,8 +208,34 @@ public:
 		unsigned int MOS_work_physicalAddr=0;
 		// This offset is only for XY coord.  Don't use it for other purposes.
 		// This is required for Fujitsu Habitat, which places MOS_work close to the page boundary.
+		/*! CS selector of Mouse BIOS at AH=00 (usage-probe self-read filter). */
+		unsigned int MOS_code_CS=0;
 		unsigned int MOS_pulsePerPixelH=8,MOS_pulsePerPixelV=8;
 		int mouseIntegrationSpeed=256;
+		/*! Guest CPU reads of MOS/TBIOS mouse-coordinate words (usage probe). */
+		unsigned int mosCoordAppReadCount=0;
+		/*! Same probe, but from Mouse BIOS / TBIOS / desktop soft-cursor CS. */
+		unsigned int mosCoordTbiosSelfReadCount=0;
+		/*! Application MOS BIOS calls (FAR CALL 0110:0040) other than init/end, made from a
+		    non-interrupt, non-system caller.  An app that reads the mouse through the MOS BIOS
+		    API (INT/CALL) does not read the coordinate memory itself — the BIOS does — so the
+		    memory-read probe alone cannot see API-based usage (e.g. MI2's launcher polls the
+		    BIOS heavily).  Counting the app's BIOS calls detects that. */
+		unsigned int mosBIOSAppCallCount=0;
+		/*! Guest reads of the gameport mouse port (I/O 0x4D2 while port 1 is a MOUSE).  A
+		    gameport-mouse game (e.g. MI2's game part) polls this every frame regardless of the
+		    integration mode or capture state — the read access happens even when we feed no
+		    motion — so it is the definitive "this title reads the mouse through the gameport,
+		    not MOS" signal, and unlike non-zero motion packets it has no chicken-and-egg with
+		    capture being released.  A MOS-only UI (MI2's launcher, TOS desktop) never polls it. */
+		unsigned int gameportMouseReadCount=0;
+		/*! CS selectors seen reading MOS coords on the desktop (soft cursor etc.). */
+		unsigned int mosCoordSystemCS[8]={0,0,0,0,0,0,0,0};
+		unsigned int mosCoordSystemCSCount=0;
+		/*! Diagnostic: distinct CS selectors counted as application MOS-coord reads. */
+		unsigned int mosCoordAppReadCS[4]={0,0,0,0};
+		unsigned int mosCoordAppReadCSHits[4]={0,0,0,0};
+		unsigned int mosCoordAppReadCSCount=0;
 
 		unsigned short DOSSEG=0;
 		unsigned short DOSVER=0;
@@ -294,6 +329,8 @@ public:
 
 		bool scanLineEffectIn15KHz=false;
 
+		unsigned int spriteTransferMode=TownsStartParameters::SPRITE_TRANSFER_AUTO;
+
 		// Report from TGMOUSE.EXE running in Windows 3.1
 		mutable bool mousePositionReported=false;
 		int mouseXReported=0,mouseYReported=0;
@@ -304,9 +341,41 @@ public:
 		*/
 		bool mouseIntegration=true;
 
+		/*! Host-side MOS/TBIOS coord Fetch must set this so the usage probe ignores them. */
+		mutable bool suppressMosCoordReadProbe=false;
+		/*! While true, MOS-coord readers are recorded as desktop system CS (soft cursor). */
+		mutable bool mosUsageLearnSystemCS=false;
+
 		bool customMouseIntegration=false;
 		std::string customMouseX,customMouseY;
 		unsigned int customMouseCaptureTiming=TOWNS_CUSTOM_MOUSE_CAPTURE_NEVER;
+
+		/*! Prep-phase mouse coord write scan (gameport IO → next stores). Default off. */
+		bool mouseCoordWriteScanEnabled=false;
+
+		/*! Force mouse-capture (differential) for coord list refresh/prune.
+		    Independent of Scan; Scan turns this on as well. */
+		bool mouseCoordForceCapture=false;
+
+		/*! Calibration session: force differential mouse IO so guest phys update. */
+		bool mouseCoordCalibrating=false;
+
+		/*! When true, Get/SetMouseCoordinate use MouseCoordWriteScan active profile
+		    (absolute poke). Set each frame from Outside_World when a verified
+		    profile applies and MOS is unused or down (never while MOS is in use).
+		    TOS desktop keeps normal MOS absolute instead. */
+		bool mouseCoordProfileApply=false;
+
+		/*! Global gate (Settings → Features): apply per-disc fp_*.ini overrides
+		    for machine settings and mouse integration. */
+		bool useDiscProfiles=true;
+
+		/*! Profile feedback-only: one packet in flight until Phys ACKs or the
+		    gameport is idle (see ControlMouse).  Re-filling too early oscillates. */
+		bool profileDeltaInFlight=false;
+		int profilePrevFeedbackX=0,profilePrevFeedbackY=0;
+		bool profileWaitFeedbackX=false,profileWaitFeedbackY=false;
+		int profileDeltaWait=0;
 
 		int mouseMinX=TownsStartParameters::DEFAULT_MOUSE_MINX;
 		int mouseMaxX=TownsStartParameters::DEFAULT_MOUSE_MAXX;
@@ -353,6 +422,11 @@ public:
 		unsigned int cpuClockScalePercent=100;
 		unsigned int busWaitClocks=0;
 		unsigned int VRAMBusWaitClocks=0;
+
+		/*! Updated in AdjustMachineSpeedForMemoryWait when FASTModeLamp() changes (VM thread). */
+		bool cachedFastModeLamp=false;
+		std::atomic<uint32_t> fastModeLampRevision{0};
+
 
 		/*! VM State loaded at start-up.
 		    Loaded in TownsThread::VMStart
@@ -428,6 +502,9 @@ public:
 		    the machine state has just been loaded.
 		*/
 		bool justLoadedState=false;
+
+		/*! Number of MIDI cards enabled at machine setup (from argv / TownsQt settings). */
+		int configuredMidiCards=0;
 
 
 
@@ -510,9 +587,18 @@ public:
 	// Machine State <<
 
 	unsigned int townsType;
+
+	/*! UG-generation peripheral I/O (see TownsStartParameters::ugGenerationIO). */
+	bool ugGenerationIO=false;
+
 	Variable var;
 	InOut io;
 	Memory mem;
+
+	std::unique_ptr<MosCoordReadProbe> mosCoordProbeA;
+	std::unique_ptr<MosCoordReadProbe> mosCoordProbeB;
+
+	MouseCoordWriteScan mouseCoordWriteScan;
 
 	/*! Pointers of all devices (except *this) must be stored in allDevices.
 	*/
@@ -617,14 +703,34 @@ public:
 	    current mouse coordinate in the VM and the host mouse coordinate.
 	*/
 	bool ControlMouse(int hostMouseX,int houstMouseY,unsigned int tbiosid);
-	bool ControlMouse(int &diffX,int &diffY,int hostMouseX,int houstMouseY,unsigned int tbiosid);
+	bool ControlMouse(int &diffX,int &diffY,int hostMouseX,int houstMouseY,unsigned int tbiosid,bool snap=false);
+
+	/*! Write guest mouse coordinate directly (MOS soft-cursor words etc.). */
+	bool SetMouseCoordinate(int mx,int my,unsigned int tbiosid);
+
+	/*! Install a short-lived probe that counts guest reads of MOS/TBIOS mouse coords. */
+	void StartMosCoordUsageProbe(void);
+	void StopMosCoordUsageProbe(void);
+	unsigned int GetGameportMouseMotionPacketCount(void) const;
+	void ResetGameportMouseMotionPacketCount(void);
+
+	/*! After Director etc., sprite-index cursor X can lag MOS; force-match on quiet desktops.
+	    Also matches half-scale sprite-plane coords (Y≈MOS/2) used with 2x CRTC zoom. */
+	void SyncMouseCursorSpritesToCoord(int mx,int my);
+
+	/*! Debug: physical words used for guest cursor X/Y for the active TBIOS layout. */
+	bool GetMouseCursorDrawCoordinate(int &mx,int &my) const;
+	/*! No-op kept for call sites; do not write guessed CURSOR_POSITION addresses. */
+	void SyncMouseCursorDrawCoordinate(int mx,int my);
+	/*! Copy mouseInfo current (+0x0C/+0x0E) into prev-draw (+0x10/+0x12) so XOR undraw matches. */
+	void SyncMouseInfoPrevDrawToCurrent(void);
 
 	/*! Control mouse return.  The difference from ControlMouse is the input x and y are in the Towns's
 	    mouse coordinate.
 	*/
 	bool ControlMouseInVMCoord(int goalMouseX,int goalMouseY,unsigned int tbiosid);
 
-	bool ControlMouseByDiff(int diffX,int diffY,unsigned int tbiosid,int slowDownRange=0);
+	bool ControlMouseByDiff(int diffX,int diffY,unsigned int tbiosid,int slowDownRange=0,bool instant=false);
 
 	bool ControlMouseByDiffDirect(int diffX,int diffY);
 
@@ -685,6 +791,14 @@ public:
 	*/
 	uint32_t GetMouseXYOffsetInMOSWork(unsigned int tbiosid) const;
 
+	/*! Apply the same host→guest transform ControlMouse uses (origin/zoom/VRAM/app tweaks). */
+	void TransformHostMouseForIntegration(int hostMouseX,int hostMouseY,
+	                                      int &outX,int &outY,
+	                                      int &originX,int &originY,
+	                                      int &zoom2xX,int &zoom2xY,
+	                                      int &page) const;
+
+
 
 	/*! After constructing FMTownsCommon class, call this function to specify where to look
 	    for the ROM images.
@@ -728,6 +842,8 @@ public:
 	/*! This function will be called from the CPU in PushCallStack in response to INT 21H.
 	*/
 	virtual void InterceptINT21H(unsigned int AX,const std::string fName);
+	/*! Record last INT 93H (Disk/CD BIOS) for CDDA invalid-MSF attribution. */
+	virtual void InterceptINT93H(unsigned int AX,unsigned int fromCS,unsigned int fromEIP);
 
 	/*! Run scheduled tasks.
 	*/
@@ -773,6 +889,18 @@ public:
 	*/
 	void PreponeNextFastDevicePollingTime(int64_t timeInNanosec);
 
+	/*! Publish VM time for GUI/audio observers that read it from other threads. */
+	inline void PublishObserverTownsTime(void)
+	{
+		state.observerTownsTimeNs.store(static_cast<uint64_t>(state.townsTime),std::memory_order_release);
+	}
+
+	inline uint64_t GetObserverTownsTimeNs(void) const
+	{
+		return state.observerTownsTimeNs.load(std::memory_order_acquire);
+	}
+
+
 	/*! Check Rendering Timer and render if townsTime catches up with the timer.
 	    It will increment rendering timer.
 	    Returns true if rendered.
@@ -808,6 +936,10 @@ public:
 
 	bool FASTModeLamp(void) const;
 
+	/*! Compatible (初代ほか): main RAM 3WS / VRAM 6WS. */
+	void SetCompatibleMemoryWait(void);
+	/*! FAST: RAM 0WS; VRAM 3WS only for 16MHz FAST (CX), else 0WS. */
+	void SetFastModeMemoryWait(void);
 
 	/*! I/O access for internal devices. */
 	virtual void IOWriteByte(unsigned int ioport,unsigned int data);
@@ -837,8 +969,19 @@ public:
 	unsigned int GetEleVolPCMLeft(void) const;
 	unsigned int GetEleVolPCMRight(void) const;
 
-	/*! Adjust CPU frequency to simulate memory wait.
+	/*! Clocks charged by memory wait-states during the current instruction. */
+	mutable unsigned int pendingMemWaitClocks=0;
+
+	/*! Add wait-state clocks for one CPU memory bus transaction. */
+	inline void AddMemWaitClocks(unsigned int clocks) const
+	{
+		pendingMemWaitClocks+=clocks;
+	}
+
+	/*! Adjust CPU frequency / instruction timing for FAST vs Compatible.
+	    Wait register values also drive per-access memory wait clocks.
 	*/
+	void ApplySpriteTransferTime(void);
 	void AdjustMachineSpeedForMemoryWait(void);
 
 	/*! Repaint Memory's per-region bus-wait table from var.busWaitClocks /
@@ -1071,6 +1214,14 @@ public:
 		// See var.cpuClockScalePercent: the 486 core's clock count scaled to
 		// the modelled CPU, plus the data-bus wait states this instruction
 		// racked up in Memory.  Both are no-ops at their defaults.
+		// pendingMemWaitClocks adds the 5E0H/5E2H/5E6H per-access memory
+		// waits charged through TownsPhysicalMemory when the 386-class
+		// timing model is off (see AdjustMachineSpeedForMemoryWait).
+		if(0!=pendingMemWaitClocks)
+		{
+			clocksPassed+=pendingMemWaitClocks;
+			pendingMemWaitClocks=0;
+		}
 		auto chargedClocks=
 		    (unsigned long long int)clocksPassed*var.cpuClockScalePercent/100
 		    +mem.TakeBusWaitClocks();

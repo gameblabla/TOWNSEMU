@@ -184,6 +184,10 @@ unsigned char TownsGamePort::Port::Read(long long int townsTime)
 			{
 				std::cout << "Motion " << mouseMotion.x() << " " << mouseMotion.y() << "\n";
 			}
+			if(0!=mouseMotion.x() || 0!=mouseMotion.y())
+			{
+				++mouseMotionPacketCount;
+			}
 			mouseMotionCopy=mouseMotion;
 			data|=((mouseMotionCopy.x()>>4)&0x0F);
 			break;
@@ -827,6 +831,30 @@ void TownsGamePort::State::Reset(void)
 		}
 		else
 		{
+			if(MOUSE==state.ports[0].device)
+			{
+				auto &cpu=townsPtr->CPU();
+				const unsigned int csVal=cpu.state.CS().value;
+				const bool tbiosCaller=
+				    0x110==csVal ||
+				    0x110==(csVal&0xFFF8);
+				const bool appCaller=
+				    0==cpu.state.inInterruptDepth &&
+				    csVal>=0x100 &&
+				    csVal<0xF000 &&
+				    true!=tbiosCaller;
+				// MOS-usage counting stays app-only.
+				if(true==appCaller)
+				{
+					++townsPtr->state.gameportMouseReadCount;
+				}
+				// Coord scan: also follow TBIOS soft-cursor updates (CS 0x110, often from ISR).
+				if(true==townsPtr->var.mouseCoordWriteScanEnabled &&
+				   (true==appCaller || true==tbiosCaller))
+				{
+					townsPtr->mouseCoordWriteScan.OnMouseIoRead(0,true==tbiosCaller);
+				}
+			}
 			return state.ports[0].Read(townsPtr->state.townsTime);
 		}
 		break;
@@ -836,6 +864,35 @@ void TownsGamePort::State::Reset(void)
 		   MOUSESTATE_XHIGH==state.ports[1].state)
 		{
 			townsPtr->CaptureCustomMouseCoordPointer();
+		}
+		if(MOUSE==state.ports[1].device)
+		{
+			// Count only application (main-loop) gameport mouse polls, not the MOS BIOS reading
+			// the mouse hardware from its timer/VSYNC ISR: while MOS is active the BIOS samples
+			// the gameport from an interrupt every frame regardless of the app (seen even in
+			// MI2's launcher), so an unfiltered count cannot tell a gameport game apart from a
+			// MOS-driven UI.  A gameport game reads this port from its main loop (nesting depth
+			// 0, application code segment); the BIOS reads it from an interrupt (depth>0) or from
+			// a system/ROM selector.  Mirrors MosCoordReadProbe::NoteRead's classification.
+			auto &cpu=townsPtr->CPU();
+			const unsigned int csVal=cpu.state.CS().value;
+			const bool tbiosCaller=
+			    0x110==csVal ||
+			    0x110==(csVal&0xFFF8);
+			const bool appCaller=
+			    0==cpu.state.inInterruptDepth &&
+			    csVal>=0x100 &&
+			    csVal<0xF000 &&
+			    true!=tbiosCaller;
+			if(true==appCaller)
+			{
+				++townsPtr->state.gameportMouseReadCount;
+			}
+			if(true==townsPtr->var.mouseCoordWriteScanEnabled &&
+			   (true==appCaller || true==tbiosCaller))
+			{
+				townsPtr->mouseCoordWriteScan.OnMouseIoRead(1,true==tbiosCaller);
+			}
 		}
 		return state.ports[1].Read(townsPtr->state.townsTime);
 		break;

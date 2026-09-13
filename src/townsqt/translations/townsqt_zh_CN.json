@@ -1,0 +1,1664 @@
+{
+  "translations": [
+    {
+      "context": "AudioMixerDialog",
+      "source": "Audio mixer",
+      "translation": "音频混音器"
+    },
+    {
+      "context": "AudioMixerDialog",
+      "source": "FM",
+      "translation": "FM"
+    },
+    {
+      "context": "AudioMixerDialog",
+      "source": "PCM",
+      "translation": "PCM"
+    },
+    {
+      "context": "AudioMixerDialog",
+      "source": "CDDA",
+      "translation": "CDDA"
+    },
+    {
+      "context": "AudioMixerDialog",
+      "source": "MIDI",
+      "translation": "MIDI"
+    },
+    {
+      "context": "AudioMixerDialog",
+      "source": "Close",
+      "translation": "关闭"
+    },
+    {
+      "context": "CdromMonitorWindow",
+      "source": "CD-ROM monitor",
+      "translation": "CD-ROM 监视器"
+    },
+    {
+      "context": "CdromMonitorWindow",
+      "source": "CD-ROM",
+      "translation": "CD-ROM"
+    },
+    {
+      "context": "CdromMonitorWindow",
+      "source": "CDDA",
+      "translation": "CDDA"
+    },
+    {
+      "context": "CdromMonitorWindow",
+      "source": "CDDA cache",
+      "translation": "CDDA 缓存"
+    },
+    {
+      "context": "DebugTextWindow",
+      "source": "Clear",
+      "translation": "清除"
+    },
+    {
+      "context": "DebugTextWindow",
+      "source": "Close",
+      "translation": "关闭"
+    },
+    {
+      "context": "DriveConfigPage",
+      "source": "Single-drive mode (disable FD1)",
+      "translation": "单驱动器（禁用 FD1）"
+    },
+    {
+      "context": "DriveConfigPage",
+      "source": "Towns CMOS flag at I/O 0x328C. When on, FD1 is unavailable.",
+      "translation": "Towns CMOS 标志（I/O 0x328C）。开启时 FD1 不可用。"
+    },
+    {
+      "context": "DriveConfigPage",
+      "source": "Drive letter assignments (A–P). Apply or OK writes VM CMOS RAM and the active CMOS file. Towns OS usually picks them up after reset/boot.",
+      "translation": "驱动器盘符（A–P）。应用/OK 写入 VM CMOS RAM 与活动 CMOS 文件。Towns OS 通常在复位/启动后生效。"
+    },
+    {
+      "context": "DriveConfigPage",
+      "source": "Type",
+      "translation": "类型"
+    },
+    {
+      "context": "DriveConfigPage",
+      "source": "Unit",
+      "translation": "Unit"
+    },
+    {
+      "context": "DriveConfigPage",
+      "source": "Unassigned",
+      "translation": "未分配"
+    },
+    {
+      "context": "DriveConfigPage",
+      "source": "FD",
+      "translation": "FD"
+    },
+    {
+      "context": "DriveConfigPage",
+      "source": "SCSI",
+      "translation": "SCSI"
+    },
+    {
+      "context": "DriveConfigPage",
+      "source": "ROM",
+      "translation": "ROM"
+    },
+    {
+      "context": "HddSettingsDialog",
+      "source": "Hard disk drive settings",
+      "translation": "硬盘设置"
+    },
+    {
+      "context": "HddSettingsDialog",
+      "source": "HD%1",
+      "translation": "HD%1"
+    },
+    {
+      "context": "HddSettingsDialog",
+      "source": "No image",
+      "translation": "无镜像"
+    },
+    {
+      "context": "HddSettingsDialog",
+      "source": "Create",
+      "translation": "创建"
+    },
+    {
+      "context": "HddSettingsDialog",
+      "source": "Create a sparse image.\nLogical size is as entered; disk usage starts small and grows on write.",
+      "translation": "创建稀疏镜像。\n逻辑大小按输入；实际占用随写入增长。"
+    },
+    {
+      "context": "HddSettingsDialog",
+      "source": "Compact",
+      "translation": "压缩"
+    },
+    {
+      "context": "HddSettingsDialog",
+      "source": "Make an existing image sparse by punching holes in zero regions.\nLogical size is unchanged; only on-disk usage shrinks.",
+      "translation": "对现有镜像打洞稀疏化。\n逻辑大小不变；仅减少磁盘占用。"
+    },
+    {
+      "context": "HddSettingsDialog",
+      "source": "Browse…",
+      "translation": "浏览…"
+    },
+    {
+      "context": "HddSettingsDialog",
+      "source": "Remove",
+      "translation": "移除"
+    },
+    {
+      "context": "HddSettingsDialog",
+      "source": "TownsOS: create with 1 partition + format (127 MB, max size)",
+      "translation": "TownsOS：1 分区 + 格式化（127 MB，最大）"
+    },
+    {
+      "context": "HddSettingsDialog",
+      "source": "Writes Towns HD IPL, one full-size partition, and an empty FAT16.\nFor HD0, CMOS is set to D: = SCSI unit 0 after OK.\nRestart the emulator to recognize the drive.",
+      "translation": "写入 Towns HD IPL、整盘分区与空 FAT16。\nHD0：OK 后 CMOS D: = SCSI unit 0。\n需重启以识别。"
+    },
+    {
+      "context": "HddSettingsDialog",
+      "source": "New images are created sparse. File managers show logical size; actual disk usage stays small until data is written.",
+      "translation": "新镜像为稀疏。文件管理器显示逻辑大小；写入前实际占用很小。"
+    },
+    {
+      "context": "HddSettingsDialog",
+      "source": "Images are stored under %1 by default.",
+      "translation": "镜像默认保存在 %1。"
+    },
+    {
+      "context": "HddSettingsDialog",
+      "source": "Changes take effect after the emulator is restarted.",
+      "translation": "重启模拟器后生效。"
+    },
+    {
+      "context": "HddSettingsDialog",
+      "source": "Path: %1\nLogical size: %2\nDisk usage: %3",
+      "translation": "路径: %1\n逻辑大小: %2\n磁盘占用: %3"
+    },
+    {
+      "context": "HddSettingsDialog",
+      "source": "Create hard disk image",
+      "translation": "创建 HD 镜像"
+    },
+    {
+      "context": "HddSettingsDialog",
+      "source": "Logical size in MB (%1–%2).\nCreated as a sparse image:",
+      "translation": "逻辑大小（MB，%1–%2）。\n创建为稀疏镜像："
+    },
+    {
+      "context": "HddSettingsDialog",
+      "source": "Create a 127 MB TownsOS image with one full-size partition and an empty format?\nFor HD0, D: will be set to SCSI unit 0 in CMOS when you press OK.",
+      "translation": "创建 127 MB TownsOS 镜像（整盘分区、空格式）？\nHD0：按 OK 时在 CMOS 将 D: 设为 SCSI unit 0。"
+    },
+    {
+      "context": "HddSettingsDialog",
+      "source": "Failed to create the hard disk directory.",
+      "translation": "无法创建硬盘目录。"
+    },
+    {
+      "context": "HddSettingsDialog",
+      "source": "Hard disk images (*.hd *.hdi *.hdm *.bin);;All files (*)",
+      "translation": "硬盘镜像 (*.hd *.hdi *.hdm *.bin);;所有文件 (*)"
+    },
+    {
+      "context": "HddSettingsDialog",
+      "source": "The file already exists. Overwrite it?",
+      "translation": "文件已存在。覆盖吗？"
+    },
+    {
+      "context": "HddSettingsDialog",
+      "source": "Failed to create the hard disk image.",
+      "translation": "无法创建硬盘镜像。"
+    },
+    {
+      "context": "HddSettingsDialog",
+      "source": "Created a TownsOS-formatted sparse hard disk image (1 partition).\n\n",
+      "translation": "已创建 TownsOS 稀疏 HD 镜像（1 分区）。\n\n"
+    },
+    {
+      "context": "HddSettingsDialog",
+      "source": "Created a sparse hard disk image.\n\n",
+      "translation": "已创建稀疏 HD 镜像。\n\n"
+    },
+    {
+      "context": "HddSettingsDialog",
+      "source": "Logical size (for FM TOWNS): %1\nDisk usage on this computer: %2\n\nFile managers list logical size. Use the tooltip on the path field or `du -h` to check disk usage.",
+      "translation": "逻辑大小（FM TOWNS）: %1\n本机占用: %2\n\n文件管理器显示逻辑大小。路径提示或 `du -h` 查看实际占用。"
+    },
+    {
+      "context": "HddSettingsDialog",
+      "source": "\n\nAfter OK: CMOS D: = SCSI unit 0 (HD0). Restart to recognize the drive.",
+      "translation": "\n\nOK 后：CMOS D: = SCSI unit 0（HD0）。重启以识别驱动器。"
+    },
+    {
+      "context": "HddSettingsDialog",
+      "source": "Compact hard disk image",
+      "translation": "压缩 HD 镜像"
+    },
+    {
+      "context": "HddSettingsDialog",
+      "source": "The selected file does not exist.",
+      "translation": "所选文件不存在。"
+    },
+    {
+      "context": "HddSettingsDialog",
+      "source": "Failed to compact the hard disk image.\nSparse compaction is supported on Linux with ext4, XFS, or Btrfs.",
+      "translation": "压缩失败。\nLinux 上需 ext4、XFS 或 Btrfs 支持稀疏。"
+    },
+    {
+      "context": "HddSettingsDialog",
+      "source": "Compacted the hard disk image.\nLogical size is unchanged; unused zero regions now use less disk space.",
+      "translation": "已压缩 HD 镜像。\n逻辑大小不变；零区域占用减少。"
+    },
+    {
+      "context": "HddSettingsDialog",
+      "source": "Select hard disk image",
+      "translation": "选择 HD 镜像"
+    },
+    {
+      "context": "MainWindow",
+      "source": "About Tsugaru %1",
+      "translation": "关于 Tsugaru %1"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Starting…",
+      "translation": "正在启动…"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Failed to load CD image",
+      "translation": "无法加载 CD 镜像"
+    },
+    {
+      "context": "MainWindow",
+      "source": "CD: %1",
+      "translation": "CD: %1"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Restarting the emulator…",
+      "translation": "正在重启…"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Emulator restarted",
+      "translation": "已重启"
+    },
+    {
+      "context": "MainWindow",
+      "source": "&Operation",
+      "translation": "操作(&O)"
+    },
+    {
+      "context": "MainWindow",
+      "source": "&Restart",
+      "translation": "重启(&R)"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Compatible",
+      "translation": "Compatible"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Game pads…",
+      "translation": "手柄…"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Window scale",
+      "translation": "窗口缩放"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Decrease window scale",
+      "translation": "缩小窗口"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Increase window scale",
+      "translation": "放大窗口"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Toggle &fullscreen",
+      "translation": "全屏(&F)"
+    },
+    {
+      "context": "MainWindow",
+      "source": "&Quit",
+      "translation": "退出(&Q)"
+    },
+    {
+      "context": "MainWindow",
+      "source": "&CD-ROM",
+      "translation": "CD-ROM(&C)"
+    },
+    {
+      "context": "MainWindow",
+      "source": "&Open CD image…",
+      "translation": "打开 CD(&O)…"
+    },
+    {
+      "context": "MainWindow",
+      "source": "&Eject CD",
+      "translation": "弹出 CD(&E)"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Open &recent files",
+      "translation": "最近文件(&R)"
+    },
+    {
+      "context": "MainWindow",
+      "source": "&Disk",
+      "translation": "磁盘(&D)"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Hard disk drive settings…",
+      "translation": "硬盘…"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Open FD image (%1)…",
+      "translation": "打开 FD (%1)…"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Eject FD",
+      "translation": "弹出 FD"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Open recent files",
+      "translation": "最近文件"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Write protect",
+      "translation": "写保护"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Create blank FD image",
+      "translation": "空白 FD"
+    },
+    {
+      "context": "MainWindow",
+      "source": "&Tools",
+      "translation": "工具(&T)"
+    },
+    {
+      "context": "MainWindow",
+      "source": "&Settings…",
+      "translation": "设置(&S)…"
+    },
+    {
+      "context": "MainWindow",
+      "source": "&State",
+      "translation": "State(&S)"
+    },
+    {
+      "context": "MainWindow",
+      "source": "&Load",
+      "translation": "加载(&L)"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Slot %1",
+      "translation": "Slot %1"
+    },
+    {
+      "context": "MainWindow",
+      "source": "&Save",
+      "translation": "保存(&S)"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Audio mixer…",
+      "translation": "音频混音器…"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Drive access",
+      "translation": "驱动器访问"
+    },
+    {
+      "context": "MainWindow",
+      "source": "FPS display",
+      "translation": "显示 FPS"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Show FPS, emulation Hz, and present-queue stats in the window title.",
+      "translation": "在标题栏显示 FPS、仿真 Hz 与 present 队列。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Debug overlay",
+      "translation": "调试叠加"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Mouse integration coords",
+      "translation": "鼠标坐标"
+    },
+    {
+      "context": "MainWindow",
+      "source": "MIDI monitor",
+      "translation": "MIDI 监视器"
+    },
+    {
+      "context": "MainWindow",
+      "source": "CD-ROM monitor",
+      "translation": "CD-ROM 监视器"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Log CD-ROM commands, CDDA play/stop, and data-sector access.",
+      "translation": "记录 CD 命令、CDDA play/stop 与数据扇区访问。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "APP monitor",
+      "translation": "APP 监视器"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Log guest EXE/EXP identity, MOS session, in-game phase, and mouse apply.",
+      "translation": "记录访客 EXE/EXP、MOS 会话、阶段与鼠标 apply。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "CPU / CS:EIP history",
+      "translation": "CPU / CS:EIP"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Live CPU registers, current instruction, CS:EIP history, and call stack. Enables the core debugger while open.",
+      "translation": "实时 CPU 寄存器、当前指令、CS:EIP 历史与调用栈。打开时启用核心调试器。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "&Help",
+      "translation": "帮助(&H)"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Disc profile clock updated.",
+      "translation": "已更新配置文件时钟。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "CD-ROM speed  %1",
+      "translation": "CD 速度  %1"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Sprite transfer  %1",
+      "translation": "Sprite 传输  %1"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Hard disk drive settings",
+      "translation": "硬盘设置"
+    },
+    {
+      "context": "MainWindow",
+      "source": "HD image created, but failed to set CMOS D: = SCSI unit 0.",
+      "translation": "已创建 HD 镜像，但未能设置 CMOS D: = SCSI unit 0。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Hard disk settings saved (CMOS D: = SCSI unit 0). Restart to recognize HD0.",
+      "translation": "已保存硬盘设置（CMOS D: = SCSI unit 0）。重启以识别 HD0。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Hard disk settings saved. They take effect after restart.",
+      "translation": "已保存硬盘设置。重启后生效。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Drive configuration",
+      "translation": "驱动器"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Failed to update CMOS (file missing or not writable).",
+      "translation": "无法更新 CMOS（缺失或不可写）。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Could not apply mouse profile (need a disc profile).",
+      "translation": "无法应用鼠标配置（需要光盘配置文件）。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Could not create disc profile.",
+      "translation": "无法创建配置文件。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Could not delete disc profile.",
+      "translation": "无法删除配置文件。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Disc profile deleted.",
+      "translation": "已删除配置文件。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Bound current EXP to disc profile.",
+      "translation": "已将 EXP 绑定到配置文件。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "<div style=\"line-height:1.35\"><b>Tsugaru \"津軽\"</b><br>FM TOWNS / Marty emulator<br>for Linux (Qt) %1<br><br><a href=\"https://github.com/3d4m0t0/TOWNSEMU\">https://github.com/3d4m0t0/TOWNSEMU</a><br><br>%2<br><a href=\"https://github.com/captainys/TOWNSEMU\">https://github.com/captainys/TOWNSEMU</a></div>",
+      "translation": "<div style=\"line-height:1.35\"><b>Tsugaru \"津軽\"</b><br>FM TOWNS / Marty 模拟器<br>Linux (Qt) %1<br><br><a href=\"https://github.com/3d4m0t0/TOWNSEMU\">https://github.com/3d4m0t0/TOWNSEMU</a><br><br>%2<br><a href=\"https://github.com/captainys/TOWNSEMU\">https://github.com/captainys/TOWNSEMU</a></div>"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Original",
+      "translation": "Original"
+    },
+    {
+      "context": "MainWindow",
+      "source": "The selected CPU/model did not match the SYS ROM, so it was reset to an allowed value.",
+      "translation": "所选 CPU/型号与 SYS ROM 不符，已重置为允许值。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Could not save disc profile.",
+      "translation": "无法保存配置文件。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Open CD image",
+      "translation": "打开 CD 镜像"
+    },
+    {
+      "context": "MainWindow",
+      "source": "CD images (*.cue *.iso *.bin *.mds *.chd);;All files (*)",
+      "translation": "CD 映像 (*.cue *.iso *.bin *.mds *.chd);;所有文件 (*)"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Open FD image (%1)",
+      "translation": "打开 FD 镜像 (%1)"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Floppy images (*.d77 *.xdf *.hdm *.fdd *.bin);;All files (*)",
+      "translation": "软盘映像 (*.d77 *.xdf *.hdm *.fdd *.bin);;所有文件 (*)"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Failed to create the FD image.",
+      "translation": "无法创建 FD 镜像。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Unsupported floppy-image extension.",
+      "translation": "不支持的软盘扩展名。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "The file already exists. Overwrite it?",
+      "translation": "文件已存在。覆盖吗？"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Clear list",
+      "translation": "清空列表"
+    },
+    {
+      "context": "MainWindow",
+      "source": "CD ejected",
+      "translation": "已弹出 CD"
+    },
+    {
+      "context": "MainWindow",
+      "source": "FD%1 ejected",
+      "translation": "已弹出 FD%1"
+    },
+    {
+      "context": "MainWindow",
+      "source": "FD%1: %2",
+      "translation": "FD%1: %2"
+    },
+    {
+      "context": "MainWindow",
+      "source": " — %1 FPS | %2 Hz | P:%3 C:%4 lag:%5",
+      "translation": " — %1 FPS | %2 Hz | P:%3 C:%4 lag:%5"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Profile enabled",
+      "translation": "配置文件已启用"
+    },
+    {
+      "context": "MainWindow",
+      "source": "A disc profile is loaded for the mounted CD.",
+      "translation": "已为当前 CD 加载配置文件。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Mouse integration debug",
+      "translation": "鼠标集成调试"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Mouse capture ON — list refresh / prune (profile paused). ESC to stop.",
+      "translation": "鼠标捕获 ON — 刷新/清理列表（配置暂停）。ESC 停止。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Mouse capture OFF — profile mouse mode restored.",
+      "translation": "鼠标捕获 OFF — 已恢复配置文件鼠标模式。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Scan on — adding candidates (mouse capture ON). ESC to stop.",
+      "translation": "Scan ON — 添加候选项（鼠标捕获 ON）。ESC 停止。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Scan off — capture may stay on for prune.",
+      "translation": "Scan OFF — 清理时捕获可能仍开启。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Check one X and one Y candidate, then Update.",
+      "translation": "各选一个 X/Y 候选项，然后 Update。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Updated Mouse integration setting from selected X/Y.",
+      "translation": "已根据所选 X/Y 更新鼠标集成。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "VM paused (CPU debug)",
+      "translation": "VM 已暂停（CPU 调试）"
+    },
+    {
+      "context": "MainWindow",
+      "source": "VM resumed",
+      "translation": "VM 已恢复"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Tsugaru_QT",
+      "translation": "Tsugaru_QT"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Emulator stopped",
+      "translation": "模拟器已停止"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Stopped (ESC) — profile mouse mode restored.",
+      "translation": "已停止（ESC）— 已恢复配置文件鼠标模式。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Mouse capture released (ESC).",
+      "translation": "已释放鼠标捕获（ESC）。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Exit ESC",
+      "translation": "ESC 退出"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Mouse capture",
+      "translation": "鼠标捕获"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Memory scan mouse capture is active. Press ESC to stop Scan and capture.",
+      "translation": "内存扫描鼠标捕获中。按 ESC 停止 Scan 与捕获。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Mouse integration (app-specific settings)",
+      "translation": "鼠标集成（应用）"
+    },
+    {
+      "context": "MainWindow",
+      "source": "App-specific Phys integration is active. Middle button switches to mouse capture; middle again restores.",
+      "translation": "应用 Phys 集成已启用。中键切换捕获，再按恢复。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Mouse integration (Mouse BIOS)",
+      "translation": "鼠标集成 (Mouse BIOS)"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Mouse BIOS (MOS) integration is active. Middle button switches to mouse capture; middle again restores.",
+      "translation": "Mouse BIOS (MOS) 集成已启用。中键切换捕获，再按恢复。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Middle button to release",
+      "translation": "中键释放"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Mouse capture is active. Press the middle mouse button to release capture.",
+      "translation": "鼠标捕获中。按中键释放。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Mouse capture (released)",
+      "translation": "鼠标捕获（已释放）"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Middle button to capture",
+      "translation": "中键捕获"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Mouse capture released. Press the middle mouse button to start capture; press it again to release.",
+      "translation": "鼠标捕获已释放。中键开始捕获，再按释放。"
+    },
+    {
+      "context": "MainWindow",
+      "source": "%1x",
+      "translation": "%1x"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Window scale (%1x)",
+      "translation": "窗口缩放 (%1x)"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Emulator is not running",
+      "translation": "模拟器未运行"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Failed to load state slot %1",
+      "translation": "无法加载 State slot %1"
+    },
+    {
+      "context": "MainWindow",
+      "source": "State slot %1 loaded",
+      "translation": "已加载 State slot %1"
+    },
+    {
+      "context": "MainWindow",
+      "source": "No resume state for the mounted CD (slot 0)",
+      "translation": "无恢复 State（slot 0）"
+    },
+    {
+      "context": "MainWindow",
+      "source": "Failed to save state slot %1",
+      "translation": "无法保存 State slot %1"
+    },
+    {
+      "context": "MainWindow",
+      "source": "State slot %1 saved",
+      "translation": "已保存 State slot %1"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Default",
+      "translation": "默认"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Mouse capture",
+      "translation": "鼠标捕获"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Clear",
+      "translation": "清除"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Clear Game Phys / Phys 2 / range / scale / invert / Bind. You can Apply or OK with Phys unset.",
+      "translation": "Clear Game Phys / Phys 2 / range / scale / invert / Bind. You can Apply or OK with Phys unset."
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Mouse operation type",
+      "translation": "鼠标操作类型"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Current EXP:",
+      "translation": "当前 EXP:"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Linked EXP:",
+      "translation": "已绑定 EXP:"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Bind",
+      "translation": "Bind"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Bind app-specific mouse integration to the latest DOS Load/Exec (INT 21H AH=4BH). Under DOS extenders (RUN386), bind the .EXP payload when shown.",
+      "translation": "将应用鼠标绑定到最近的 DOS Load/Exec（INT 21H AH=4BH）。DOS 扩展器（RUN386）下绑定显示的 .EXP。"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Phys search",
+      "translation": "Phys 搜索"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Open Memory scan to find guest RAM cursor coordinates.\nSettings closes while the scan window is open.",
+      "translation": "打开内存扫描以查找访客 RAM 光标坐标。\n扫描窗口打开时设置会关闭。"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Load preset",
+      "translation": "加载预设"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Load a mouse-integration preset for this CD fingerprint.\nEnabled when mouse_XXXXXXXX.ini is found. Apply or OK saves it to the disc profile.",
+      "translation": "加载此 CD 指纹的鼠标预设。\n找到 mouse_XXXXXXXX.ini 时可用。应用/OK 写入光盘配置文件。"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Save to file",
+      "translation": "保存到文件"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Write the current app-specific mouse settings to\n~/.config/townsqt/mouse_presets/mouse_XXXXXXXX.ini.\nEnabled when app-specific Phys is set.",
+      "translation": "将当前应用鼠标设置写入\n~/.config/townsqt/mouse_presets/mouse_XXXXXXXX.ini。\n已设置应用 Phys 时可用。"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Axis",
+      "translation": "轴"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Phys",
+      "translation": "Phys"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "DS off",
+      "translation": "DS off"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Min",
+      "translation": "Min"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Max",
+      "translation": "Max"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Offset",
+      "translation": "Offset"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Scale",
+      "translation": "Scale"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Invert",
+      "translation": "反转"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Offset from live DS.base (WC-style). Prefer this over absolute Phys when guest layout shifts with memory/CMOS/HDD changes.",
+      "translation": "相对实时 DS.base 的偏移（WC）。内存/CMOS/HDD 改变布局时优于绝对 Phys。"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Optional second X/Y phys (below). Direct-write uses each row’s Scale on store; game-feedback uses Scale on host in Δ. Min/max are direct-write only.",
+      "translation": "Optional second X/Y phys (below). Direct-write uses each row’s Scale on store; game-feedback uses Scale on host in Δ. Min/max are direct-write only."
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Direct-write: multiplies the mapped store value. Game-feedback: multiplies host in Δ (0 = no multiply).",
+      "translation": "Direct-write: multiplies the mapped store value. Game-feedback: multiplies host in Δ (0 = no multiply)."
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Invert X",
+      "translation": "反转 X"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Invert Y",
+      "translation": "反转 Y"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "X",
+      "translation": "X"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Y",
+      "translation": "Y"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Phys 2",
+      "translation": "Phys 2"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "X2",
+      "translation": "X2"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Y2",
+      "translation": "Y2"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Memory write",
+      "translation": "内存写入"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "On: poke Game Phys in guest RAM (min/max clamp + scale on store).\nOff: gameport Δ = (host × scale) − guest (1:1 raw coords; min/max unused).",
+      "translation": "On: poke Game Phys in guest RAM (min/max clamp + scale on store).\nOff: gameport Δ = (host × scale) − guest (1:1 raw coords; min/max unused)."
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Wait for gameport input to apply",
+      "translation": "等待 gameport 输入"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "When on, hold the next gameport packet until Phys updates or the port is idle. Turn off for continuous refill (may oscillate on delayed guest feedback). Only used for gameport mode (memory write off).",
+      "translation": "开启时：在 Phys 更新或端口空闲前保留下一包 gameport。关闭则连续 refill（访客反馈延迟时可能振荡）。仅 gameport 模式。"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Stop writing to Mouse BIOS soft-cursor phys",
+      "translation": "停止写入 soft-cursor Phys"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "When on, do not write Mouse BIOS soft coordinates while MOS is alive. Game Phys / gameport still follow app-specific settings.",
+      "translation": "开启时：MOS 存活期间不写 Mouse BIOS soft 坐标。Game Phys/gameport 仍按应用设置。"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Default (priority): app-specific Phys when set and bound → Mouse BIOS (MOS) while alive → mouse capture otherwise. Middle button toggles mouse capture on/off (no click-to-capture). Set Game Phys / Bind for app-specific integration.",
+      "translation": "默认（优先级）：已设置并绑定的应用 Phys → MOS 存活时 Mouse BIOS → 否则鼠标捕获。中键切换捕获（无点击捕获）。应用需设 Game Phys/Bind。"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Mouse capture (failsafe): always uses mouse capture. Middle button enables or releases capture. Mouse integration is not performed.",
+      "translation": "鼠标捕获（安全）：始终捕获。中键开/关。不进行鼠标集成。"
+    },
+    {
+      "context": "MouseCoordProfilePage",
+      "source": "Could not write mouse preset:\n%1",
+      "translation": "无法写入鼠标预设：\n%1"
+    },
+    {
+      "context": "MouseCoordScanWindow",
+      "source": "Memory scan",
+      "translation": "内存扫描"
+    },
+    {
+      "context": "MouseCoordScanWindow",
+      "source": "Scan",
+      "translation": "Scan"
+    },
+    {
+      "context": "MouseCoordScanWindow",
+      "source": "Scan RAM for new coordinate candidates (also turns Mouse capture ON).\nMove the mouse in the emu view.  ESC stops Scan and capture.",
+      "translation": "扫描 RAM 寻找坐标候选项（同时打开鼠标捕获）。\n在仿真画面移动鼠标。ESC 停止 Scan 与捕获。"
+    },
+    {
+      "context": "MouseCoordScanWindow",
+      "source": "Mouse capture",
+      "translation": "鼠标捕获"
+    },
+    {
+      "context": "MouseCoordScanWindow",
+      "source": "Alone: refresh list values and drop unrelated candidates (no new Scan picks).\nForced while Scan is on.  Press again or ESC restores the profile mouse mode.",
+      "translation": "单独：刷新并剔除无关候选项（不新增）。\nScan 时强制开启。再按或 ESC 恢复配置鼠标模式。"
+    },
+    {
+      "context": "MouseCoordScanWindow",
+      "source": "Clear min max",
+      "translation": "清除 min/max"
+    },
+    {
+      "context": "MouseCoordScanWindow",
+      "source": "Reset observed min..max on all candidates.\nStarts again from the next sampled value.",
+      "translation": "重置所有候选项的观测 min..max。\n从下一个采样重新开始。"
+    },
+    {
+      "context": "MouseCoordScanWindow",
+      "source": "Clear candidates",
+      "translation": "清除候选项"
+    },
+    {
+      "context": "MouseCoordScanWindow",
+      "source": "Remove unselected",
+      "translation": "删除未选"
+    },
+    {
+      "context": "MouseCoordScanWindow",
+      "source": "Delete rows with none of Watch / Chase / X / Y / X2 / Y2 checked.",
+      "translation": "删除未勾选 Watch / Chase / X / Y / X2 / Y2 的行。"
+    },
+    {
+      "context": "MouseCoordScanWindow",
+      "source": "Update",
+      "translation": "Update"
+    },
+    {
+      "context": "MouseCoordScanWindow",
+      "source": "Copy the checked X/Y pair (and min..max) into Mouse integration.\nIf X2/Y2 are also checked, fill Phys 2 as well.\nCloses Memory scan and reopens Settings. Does not save — use Apply or OK there.",
+      "translation": "将勾选的 X/Y（及 min..max）复制到鼠标集成。\n若勾选 X2/Y2 则填 Phys 2。\n关闭扫描并重开设置。不保存 — 在设置中应用/OK。"
+    },
+    {
+      "context": "MouseCoordScanWindow",
+      "source": "Cancel",
+      "translation": "取消"
+    },
+    {
+      "context": "MouseCoordScanWindow",
+      "source": "Close Memory scan and return to Settings → Mouse integration.",
+      "translation": "关闭内存扫描并返回设置 → 鼠标集成。"
+    },
+    {
+      "context": "MouseCoordScanWindow",
+      "source": "Watch",
+      "translation": "Watch"
+    },
+    {
+      "context": "MouseCoordScanWindow",
+      "source": "Chase",
+      "translation": "Chase"
+    },
+    {
+      "context": "MouseCoordScanWindow",
+      "source": "X",
+      "translation": "X"
+    },
+    {
+      "context": "MouseCoordScanWindow",
+      "source": "Y",
+      "translation": "Y"
+    },
+    {
+      "context": "MouseCoordScanWindow",
+      "source": "X2",
+      "translation": "X2"
+    },
+    {
+      "context": "MouseCoordScanWindow",
+      "source": "Y2",
+      "translation": "Y2"
+    },
+    {
+      "context": "MouseCoordScanWindow",
+      "source": "phys",
+      "translation": "phys"
+    },
+    {
+      "context": "MouseCoordScanWindow",
+      "source": "sz",
+      "translation": "sz"
+    },
+    {
+      "context": "MouseCoordScanWindow",
+      "source": "value",
+      "translation": "value"
+    },
+    {
+      "context": "MouseCoordScanWindow",
+      "source": "min..max",
+      "translation": "min..max"
+    },
+    {
+      "context": "MouseCoordScanWindow",
+      "source": "span",
+      "translation": "span"
+    },
+    {
+      "context": "MouseCoordScanWindow",
+      "source": "changes",
+      "translation": "changes"
+    },
+    {
+      "context": "MouseCoordScanWindow",
+      "source": "Scan = add candidates (turns Mouse capture ON).\nMouse capture ON alone = refresh values / prune noise (no new picks).\nWatch = keep in list after Scan stops.\nChase = follow guest-writer SOURCE; moves to the new SOURCE when found.\nAlso adds nearby phys (±32 bytes) whose value Δ matches host/IO mouse Δ.\nX/Y = primary Game Phys pair.  X2/Y2 = optional Phys 2 pair.\nGreen phys = MOS soft-cursor words (writable if set as Phys).\nBlue phys = disc-profile pair.  span = max−min; oversized rows are pruned.\nESC ends capture (+ Scan).",
+      "translation": "Scan = 添加候选项（捕获 ON）。\n仅捕获 = 刷新/清理。\nWatch = Scan 后保留。\nChase = 跟随 SOURCE。\n附近 Phys（±32）若 Δ 匹配也加入。\nX/Y = Game Phys。X2/Y2 = Phys 2。\n绿 = MOS soft-cursor。蓝 = 配置。span = max−min。\nESC 结束捕获（+ Scan）。"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Auto",
+      "translation": "Auto"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Settings",
+      "translation": "设置"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "BIOS",
+      "translation": "BIOS"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "CPU",
+      "translation": "CPU"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Model",
+      "translation": "型号"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "High-res / high-res PCM",
+      "translation": "High-res / high-res PCM"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "UG SCSI / peripheral I/O",
+      "translation": "UG SCSI / peripheral I/O"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Disabled",
+      "translation": "关闭"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Create profile",
+      "translation": "创建配置文件"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "(unnamed)",
+      "translation": "（未命名）"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Delete disc profile",
+      "translation": "删除配置文件"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Delete the disc profile \"%1\"?\nPer-disc machine and mouse settings will be removed.\nThis cannot be undone.",
+      "translation": "删除配置文件“%1”？\n将移除该盘的机器/鼠标设置。\n无法撤销。"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Profile file",
+      "translation": "配置文件"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Compatible",
+      "translation": "Compatible"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": " MHz",
+      "translation": " MHz"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Boot drive",
+      "translation": "启动盘"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "CD-ROM",
+      "translation": "CD-ROM"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Pretend 386DX",
+      "translation": "伪装 386DX"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "80386FPU",
+      "translation": "80386FPU"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Fast SCSI",
+      "translation": "Fast SCSI"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Fast FD",
+      "translation": "Fast FD"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "MIDI board",
+      "translation": "MIDI 卡"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Memory",
+      "translation": "内存"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": " MB",
+      "translation": " MB"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "CPU fidelity",
+      "translation": "CPU 保真度"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "MID",
+      "translation": "MID"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "HIGH",
+      "translation": "HIGH"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Game pad / mouse ports",
+      "translation": "手柄 / 鼠标"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Max button hold time",
+      "translation": "最大按键保持"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": " ms",
+      "translation": " ms"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Any",
+      "translation": "不限"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Button 0",
+      "translation": "按钮 0"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Button 1",
+      "translation": "按钮 1"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Editing Basics defaults (townsqt.conf). Apply or OK saves here.\nMemory, boot drive, and CPU fidelity changes restart the emulator; game-port changes apply immediately.\nCreate a disc profile when a CD is mounted to save per-disc settings\n(FD0 / FD1 / HD0–HD6 mounts, and CMOS under cmos/cmos_XXXXXXXX.bin).",
+      "translation": "编辑基本默认值（townsqt.conf）。应用/OK 保存在此。\n内存、启动盘与 CPU 保真度会重启；gameport 立即生效。\n挂载 CD 时可创建按盘配置文件\n（FD0/FD1/HD0–HD6，CMOS：cmos/cmos_XXXXXXXX.bin）。"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Basics",
+      "translation": "基本"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Edits the active CMOS (global cmos.bin or profile cmos/cmos_XXXXXXXX.bin).\nApply or OK updates VM CMOS RAM and the file. Towns OS usually needs reset/boot.",
+      "translation": "编辑活动 CMOS（全局 cmos.bin 或配置 cmos/cmos_XXXXXXXX.bin）。\n应用/OK 更新 VM CMOS RAM 与文件。Towns OS 通常需复位/启动。"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Drive configuration",
+      "translation": "驱动器"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Mouse integration",
+      "translation": "鼠标集成"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Video",
+      "translation": "视频"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "x",
+      "translation": "x"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Normal",
+      "translation": "标准"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Double",
+      "translation": "双倍"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Max",
+      "translation": "Max"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Window scale:",
+      "translation": "窗口缩放:"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Sprite transfer speed:",
+      "translation": "Sprite 传输:"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "15 kHz scan-line effect",
+      "translation": "15 kHz 扫描线"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Damper-wire line",
+      "translation": "Damper-wire"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "VSync in fullscreen",
+      "translation": "全屏 VSync"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "VSync in windowed mode",
+      "translation": "窗口 VSync"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Audio",
+      "translation": "音频"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Use sinc interpolation for PCM resampling",
+      "translation": "PCM sinc 插值"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "PCM LPF",
+      "translation": "PCM LPF"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": " Hz",
+      "translation": " Hz"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Without sinc interpolation, linear interpolation is used.",
+      "translation": "无 sinc 时使用线性插值。"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Output device:",
+      "translation": "输出设备:"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Backend:",
+      "translation": "Backend:"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "MIDI output",
+      "translation": "MIDI 输出"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "SoundFont",
+      "translation": "SoundFont"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "(not set)",
+      "translation": "（未设置）"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Browse…",
+      "translation": "浏览…"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "port",
+      "translation": "port"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Changes take effect immediately when you press Apply or OK.",
+      "translation": "按应用或 OK 后立即生效。"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Video / Audio",
+      "translation": "视频 / 音频"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Enable auto-resume",
+      "translation": "自动恢复"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "When a disc profile exists for the mounted CD image, automatically save\nper-disc state save slot 0 (state0_XXXXXXXX.TState) on CD eject and app exit,\nand auto-resume on the next load. Manual restart with the same CD does not\nload a saved state. When off, state saves are neither auto-written nor auto-loaded.",
+      "translation": "有光盘配置文件时：在弹出 CD 与退出应用时自动保存 slot 0（state0_XXXXXXXX.TState），\n下次加载自动恢复。同一 CD 手动重启不加载。\n关闭则不自动保存/加载。"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Faster mouse integration",
+      "translation": "更快的鼠标集成"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Mouse BIOS integration that writes guest memory to reduce latency.",
+      "translation": "写入访客内存以降低延迟的 Mouse BIOS 集成。"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "CDDA cache:",
+      "translation": "CDDA 缓存:"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": " s",
+      "translation": " s"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Bulk-prefetch the CDDA audio track and keep playing through data reads\nwithout interrupting playback. The value is how many seconds until\nplayback is considered finished.",
+      "translation": "预取 CDDA 音轨，数据读取时不中断播放。\n数值为视为播放结束的秒数。"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Inhibit display idle",
+      "translation": "禁止屏幕休眠"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Prevents automatic screen blanking/dimming on Wayland sessions.",
+      "translation": "防止 Wayland 会话自动息屏/变暗。"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Features",
+      "translation": "功能"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Standard settings (&D)",
+      "translation": "标准设置(&D)"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Default",
+      "translation": "默认"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "%1 (not found)",
+      "translation": "%1（未找到）"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Available only on sessions that support Wayland idle-inhibit.",
+      "translation": "仅适用于支持 Wayland idle-inhibit 的会话。"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "FluidSynth",
+      "translation": "FluidSynth"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "ALSA",
+      "translation": "ALSA"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "(none)",
+      "translation": "（无）"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "(select)",
+      "translation": "（选择）"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Select SoundFont",
+      "translation": "选择 SoundFont"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "SoundFont (*.sf2);;All files (*)",
+      "translation": "SoundFont (*.sf2);;所有文件 (*)"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Editing the disc profile (fp_XXXXXXXX.ini, amber block).\nApply or OK saves clock, boot drive, memory, ports, options,\nand FD0 / FD1 / HD0–HD6 mount state to the profile (restored on next load).\nCMOS (drive letters, single drive) uses cmos/cmos_XXXXXXXX.bin for this disc — set in Towns SETUP.\nCPU and model stay global in townsqt.conf and are not stored in the profile.\nMemory, boot drive, and CPU fidelity changes restart the emulator.",
+      "translation": "编辑光盘配置文件（fp_XXXXXXXX.ini，琥珀色框）。\n应用/OK 保存时钟、启动盘、内存、端口、选项\n及 FD0/FD1/HD0–HD6 挂载。\nCMOS：cmos/cmos_XXXXXXXX.bin — Towns SETUP。\nCPU/型号保持全局（townsqt.conf）。\n内存/启动盘/CPU 保真度 → 重启。"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "No disc profile for this CD yet. Use Create profile to save per-disc settings\n(including FD0, FD1, and HD0–HD6 mount state for restore).\nA profile also gets its own CMOS file (cmos/cmos_XXXXXXXX.bin) for Towns SETUP.\nUntil then, Apply or OK saves Basics defaults to townsqt.conf.\nMemory, boot drive, and CPU fidelity changes restart the emulator; game-port changes apply immediately.",
+      "translation": "此 CD 尚无配置文件。用「创建配置文件」保存按盘设置\n（含 FD0/FD1/HD0–HD6）。\n配置文件另有 CMOS（cmos/cmos_XXXXXXXX.bin）。\n此前应用/OK 将基本设置写入 townsqt.conf。\n内存/启动盘/CPU 保真度 → 重启；gameport 立即。"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Enabled",
+      "translation": "开启"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "No CD mounted.",
+      "translation": "未挂载 CD。"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "No profile for this disc.",
+      "translation": "此光盘无配置文件。"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Disc profile loaded.",
+      "translation": "已加载配置文件。"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "(no CD)",
+      "translation": "（无 CD）"
+    },
+    {
+      "context": "SettingsDialog",
+      "source": "Delete profile",
+      "translation": "删除配置文件"
+    },
+    {
+      "context": "TownsQtCpuProfile",
+      "source": "80386DX",
+      "translation": "80386DX"
+    },
+    {
+      "context": "TownsQtCpuProfile",
+      "source": "80386SX",
+      "translation": "80386SX"
+    },
+    {
+      "context": "TownsQtCpuProfile",
+      "source": "80486SX",
+      "translation": "80486SX"
+    },
+    {
+      "context": "TownsQtCpuProfile",
+      "source": "80486DX",
+      "translation": "80486DX"
+    },
+    {
+      "context": "TownsQtCpuProfile",
+      "source": "Pentium",
+      "translation": "Pentium"
+    },
+    {
+      "context": "TownsQtCpuProfile",
+      "source": "Marty",
+      "translation": "Marty"
+    },
+    {
+      "context": "TownsQtRomAvailability",
+      "source": "FMT_SYS.ROM: not found",
+      "translation": "FMT_SYS.ROM: 未找到"
+    },
+    {
+      "context": "TownsQtRomAvailability",
+      "source": "FMT_SYS.ROM: unknown",
+      "translation": "FMT_SYS.ROM: 未知"
+    },
+    {
+      "context": "TownsQtRomAvailability",
+      "source": "FMT_SYS.ROM: %1",
+      "translation": "FMT_SYS.ROM: %1"
+    }
+  ]
+}

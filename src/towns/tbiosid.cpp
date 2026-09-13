@@ -15,11 +15,13 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 #include <iostream>
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 
 #include "towns.h"
 #include "townsdef.h"
 #include "tbiosid.h"
 #include "townscommandutil.h"
+#include "cpputil.h"
 
 // For Wing Commander 2 mouse integration.
 // Looks like DS is page aligned.
@@ -248,7 +250,10 @@ void FMTownsCommon::OnCRTC_HST_Write(void)
 	}
 
 	auto &cpu=CPU();
-	std::cout << "Write to CRTC-HST register." << std::endl;
+	if(true==cpputil::DebugLogEnabled())
+	{
+		std::cout << "Write to CRTC-HST register." << std::endl;
+	}
 	if(0!=(cpu.state.GetCR(0)&i486DXCommon::CR0_PROTECTION_ENABLE))
 	{
 		switch(state.appSpecificSetting)
@@ -434,6 +439,9 @@ void FMTownsCommon::OnCRTC_HST_Write(void)
 			break;
 		}
 	}
+	// Disc-profile DS→phys: same timing as built-in UW/WC mouse-ptr identify
+	// (cache; do not re-resolve every DevicePolling mouse poll).
+	mouseCoordWriteScan.ResolveActiveProfileDsOffsets();
 }
 
 void FMTownsCommon::CaptureCustomMouseCoordPointer(void)
@@ -568,7 +576,139 @@ bool FMTownsCommon::ControlMouse(int hostMouseX,int hostMouseY,unsigned int tbio
 	int diffX,diffY;
 	return ControlMouse(diffX,diffY,hostMouseX,hostMouseY,tbiosid);
 }
-bool FMTownsCommon::ControlMouse(int &diffX,int &diffY,int hostMouseX,int hostMouseY,unsigned int tbiosid)
+void FMTownsCommon::TransformHostMouseForIntegration(int hostMouseX,int hostMouseY,
+                                                     int &outX,int &outY,
+                                                     int &originX,int &originY,
+                                                     int &zoom2xX,int &zoom2xY,
+                                                     int &page) const
+{
+	Vec2i origin;
+	Vec2i zoom2x;
+	unsigned int VRAMSize;
+	page=0;
+	if(true!=state.mouseBIOSActive &&
+	   TOWNS_APPSPECIFIC_WINGCOMMANDER2==state.appSpecificSetting)
+	{
+		origin=crtc.GetPageOriginOnMonitor(0);
+		zoom2x.Set(4,4);
+		VRAMSize=0x80000;
+	}
+	else if(true==crtc.InSinglePageMode())
+	{
+		origin=crtc.GetPageOriginOnMonitor(0);
+		zoom2x=crtc.GetPageZoom2X(0);
+		VRAMSize=crtc.GetEffectiveVRAMSize();
+	}
+	else
+	{
+		page=state.mouseDisplayPage;
+		origin=crtc.GetPageOriginOnMonitor(state.mouseDisplayPage);
+		zoom2x=crtc.GetPageZoom2X(state.mouseDisplayPage);
+		VRAMSize=crtc.GetEffectiveVRAMSize()/2;
+	}
+	originX=origin.x();
+	originY=origin.y();
+	zoom2xX=zoom2x.x();
+	zoom2xY=zoom2x.y();
+
+	hostMouseX-=origin.x();
+	hostMouseY-=origin.y();
+	if(0<zoom2x.x())
+	{
+		hostMouseX=hostMouseX*2/zoom2x.x();
+	}
+	if(0<zoom2x.y())
+	{
+		hostMouseY=hostMouseY*2/zoom2x.y();
+	}
+
+	// 2020/07/08
+	// Lemmings uses double-buffering.  In TBIOS, mouse pointer is influenced by the VRAM offset.
+	// However, in Lemmings the mouse pointer is distance from top-left corner of the monitor
+	// regardless of the VRAM offset.  Therefore, the transformation needs to be skipped.
+	// Also internally-stored X coordinate looks to be half of the actual coordinate.
+	// Same problem for Drakken.
+	bool considerVRAMOffset=var.considerVRAMOffsetInMouseIntegration;
+	switch(state.appSpecificSetting)
+	{
+	case TOWNS_APPSPECIFIC_HABITAT:
+		considerVRAMOffset=true;
+		break;
+	case TOWNS_APPSPECIFIC_AMARANTH3:
+		considerVRAMOffset=false;
+		break;
+	case TOWNS_APPSPECIFIC_OPERATIONWOLF:
+		considerVRAMOffset=false;
+		break;
+	case TOWNS_APPSPECIFIC_LEMMINGS:
+		considerVRAMOffset=false;
+		hostMouseX*=zoom2x.x();
+		hostMouseX/=4;
+		break;
+	case TOWNS_APPSPECIFIC_DRAKKEN:
+		considerVRAMOffset=false;
+		hostMouseY-=20;
+		break;
+	case TOWNS_APPSPECIFIC_LEMMINGS2:
+		hostMouseY-=8;
+		if(hostMouseY<-8)
+		{
+			hostMouseY=-8;
+		}
+		hostMouseX+=8;
+		if(327==hostMouseX)
+		{
+			hostMouseX=328; // Otherwise cannot scroll to the right
+		}
+		break;
+	}
+
+	// 2020/06/13
+	// SuperDAISENRYAKU uses mouse with VRAM offset=3BC00H.
+	// This offset makes towns mouse cursor appear 32 pixels down from the Windows mouse cursor.
+	// VRAM offset needs to be taken into account.
+	if(true==considerVRAMOffset)
+	{
+		int bytesPerLine=crtc.GetPageBytesPerLine(state.mouseDisplayPage);
+		if(0!=bytesPerLine)
+		{
+			int VRAMoffset=crtc.GetPageVRAMAddressOffset(state.mouseDisplayPage);
+			unsigned int VRAMHeight=VRAMSize/bytesPerLine;
+
+			// 2020/12/18
+			// SuperDAISENRYAKU needs to make the VRAM offset signed, but I suspect making it signed
+			// contradicted with something else.  I fix it this time, but it may break something else,
+			// in which case I'll need to think about something else to support both.
+			if(VRAMSize/2<=VRAMoffset)
+			{
+				VRAMoffset-=VRAMSize;
+			}
+
+			hostMouseY+=VRAMoffset/bytesPerLine;
+			// The following must be signed int.
+			// Wing Commander 2's mouse coordinate is signed.
+			hostMouseY=std::min<int>(hostMouseY,VRAMHeight-1);
+
+			// Horizontal component of FA0 (Director may leave a non-row-aligned offset).
+			// Previously only the vertical component was applied.
+			int hBytes=VRAMoffset%bytesPerLine;
+			if(hBytes<0)
+			{
+				hBytes+=bytesPerLine;
+			}
+			const int bpp=crtc.GetPageBitsPerPixel(state.mouseDisplayPage);
+			if(0<bpp)
+			{
+				hostMouseX+=(hBytes*8)/bpp;
+			}
+		}
+	}
+
+	outX=hostMouseX;
+	outY=hostMouseY;
+}
+
+bool FMTownsCommon::ControlMouse(int &diffX,int &diffY,int hostMouseX,int hostMouseY,unsigned int tbiosid,bool snap)
 {
 	// Wing Commander 2 requires mouse deltas to be zero until the mouse-presence check is done.
 	if(true!=state.mouseBIOSActive &&
@@ -591,7 +731,7 @@ bool FMTownsCommon::ControlMouse(int &diffX,int &diffY,int hostMouseX,int hostMo
 	hostMouseX=std::min(hostMouseX,var.mouseMaxX);
 	hostMouseY=std::min(hostMouseY,var.mouseMaxY);
 
-	int mx,my;
+	int mx=0,my=0;
 	int slowDownRange=0;
 	var.lastKnownMouseX=hostMouseX;
 	var.lastKnownMouseY=hostMouseY;
@@ -603,117 +743,664 @@ bool FMTownsCommon::ControlMouse(int &diffX,int &diffY,int hostMouseX,int hostMo
 	}
 	// Windows 3.1 <<
 
-	if(true==GetMouseCoordinate(mx,my,tbiosid) && true==var.mouseIntegration)
+	const bool haveGuest=GetMouseCoordinate(mx,my,tbiosid);
+	if(true==var.mouseIntegration)
 	{
-		Vec2i origin;
+		// CD mouse-coord profile: map emulator-image coords → soft-cursor space, then
+		// feed host−soft deltas via gameport.  Skip TransformHostMouse — CRTC zoom often
+		// leaves 640-space while soft cursor is 320-logical.
+		if(true==var.mouseCoordProfileApply)
+		{
+			const auto p=mouseCoordWriteScan.GetActiveProfile();
+			// MOS mode must never use this path (WantsProfileAbsolute excludes it).
+			// Phys (DW poke / GF Δ): follow profile settings as-is.
+			// MOS alive under app-specific: immediate soft coordinate write
+			// (no wait-feedback / no warmup grace).
+			const int rawHostX=hostMouseX;
+			const int rawHostY=hostMouseY;
 
-
-		Vec2i zoom2x;
-		unsigned int VRAMSize;
-		if(true!=state.mouseBIOSActive &&
-		   TOWNS_APPSPECIFIC_WINGCOMMANDER2==state.appSpecificSetting)
-		{
-			origin=crtc.GetPageOriginOnMonitor(0);
-			zoom2x.Set(4,4);
-			VRAMSize=0x80000;
-		}
-		else if(true==crtc.InSinglePageMode())
-		{
-			origin=crtc.GetPageOriginOnMonitor(0);
-			zoom2x=crtc.GetPageZoom2X(0);
-			VRAMSize=crtc.GetEffectiveVRAMSize();
-		}
-		else
-		{
-			origin=crtc.GetPageOriginOnMonitor(state.mouseDisplayPage);
-			zoom2x=crtc.GetPageZoom2X(state.mouseDisplayPage);
-			VRAMSize=crtc.GetEffectiveVRAMSize()/2;
-		}
-		hostMouseX-=origin.x();
-		hostMouseY-=origin.y();
-		if(0<zoom2x.x())
-		{
-			hostMouseX=hostMouseX*2/zoom2x.x();
-		}
-		if(0<zoom2x.y())
-		{
-			hostMouseY=hostMouseY*2/zoom2x.y();
-		}
-
-		// 2020/07/08
-		// Lemmings uses double-buffering.  In TBIOS, mouse pointer is influenced by the VRAM offset.
-		// However, in Lemmings the mouse pointer is distance from top-left corner of the monitor
-		// regardless of the VRAM offset.  Therefore, the transformation needs to be skipped.
-		// Also internally-stored X coordinate looks to be half of the actual coordinate.
-		// Same problem for Drakken.
-		bool considerVRAMOffset=var.considerVRAMOffsetInMouseIntegration;
-		switch(state.appSpecificSetting)
-		{
-		case TOWNS_APPSPECIFIC_HABITAT:
-			considerVRAMOffset=true;
-			break;
-		case TOWNS_APPSPECIFIC_AMARANTH3:
-			considerVRAMOffset=false;
-			break;
-		case TOWNS_APPSPECIFIC_OPERATIONWOLF:
-			considerVRAMOffset=false;
-			break;
-		case TOWNS_APPSPECIFIC_LEMMINGS:
-			considerVRAMOffset=false;
-			hostMouseX*=zoom2x.x();
-			hostMouseX/=4;
-			slowDownRange=4;
-			break;
-		case TOWNS_APPSPECIFIC_DRAKKEN:
-			considerVRAMOffset=false;
-			hostMouseY-=20;
-			break;
-		case TOWNS_APPSPECIFIC_LEMMINGS2:
-			hostMouseY-=8;
-			if(hostMouseY<-8)
+			auto clampDiffToScreen=[&](void)
 			{
-				hostMouseY=-8;
-			}
-			hostMouseX+=8;
-			if(327==hostMouseX)
-			{
-				hostMouseX=328; // Otherwise cannot scroll to the right
-			}
-			break;
-		}
-
-		// 2020/06/13
-		// SuperDAISENRYAKU uses mouse with VRAM offset=3BC00H.
-		// This offset makes towns mouse cursor appear 32 pixels down from the Windows mouse cursor.
-		// VRAM offset needs to be taken into account.
-		if(true==considerVRAMOffset)
-		{
-			int bytesPerLine=crtc.GetPageBytesPerLine(state.mouseDisplayPage);
-			if(0!=bytesPerLine)
-			{
-				int VRAMoffset=crtc.GetPageVRAMAddressOffset(state.mouseDisplayPage);
-				unsigned int VRAMHeight=VRAMSize/bytesPerLine;
-
-				// 2020/12/18
-				// SuperDAISENRYAKU needs to make the VRAM offset signed, but I suspect making it signed
-				// contradicted with something else.  I fix it this time, but it may break something else,
-				// in which case I'll need to think about something else to support both.
-				if(VRAMSize/2<=VRAMoffset)
+				int screenW=0,screenH=0;
+				if(true!=mouseCoordWriteScan.TryGuestScreenSize(screenW,screenH))
 				{
-					VRAMoffset-=VRAMSize;
+					return;
 				}
+				const int maxX=screenW-1;
+				const int maxY=screenH-1;
+				if(true==p.invertX)
+				{
+					if(0>diffX && mx>=maxX)
+					{
+						diffX=0;
+					}
+					if(0<diffX && mx<=0)
+					{
+						diffX=0;
+					}
+				}
+				else
+				{
+					if(0<diffX && mx>=maxX)
+					{
+						diffX=0;
+					}
+					if(0>diffX && mx<=0)
+					{
+						diffX=0;
+					}
+				}
+				if(true==p.invertY)
+				{
+					if(0>diffY && my>=maxY)
+					{
+						diffY=0;
+					}
+					if(0<diffY && my<=0)
+					{
+						diffY=0;
+					}
+				}
+				else
+				{
+					if(0<diffY && my>=maxY)
+					{
+						diffY=0;
+					}
+					if(0>diffY && my<=0)
+					{
+						diffY=0;
+					}
+				}
+			};
 
-				hostMouseY+=VRAMoffset/bytesPerLine;
-				// The following must be signed int.
-				// Wing Commander 2's mouse coordinate is signed.
-				hostMouseY=std::min<int>(hostMouseY,VRAMHeight-1);
+			auto waitFeedbackHold=[&](bool waitFb)->bool
+			{
+				if(true!=waitFb)
+				{
+					var.profileDeltaInFlight=false;
+					return false;
+				}
+				constexpr int PROFILE_DELTA_WAIT_MAX=32;
+				constexpr int PROFILE_DELTA_PORT_IDLE_GRACE=3;
+				if(true!=var.profileDeltaInFlight)
+				{
+					return false;
+				}
+				bool portIdle=true;
+				for(const auto &port : gameport.state.ports)
+				{
+					if(TownsGamePort::MOUSE==port.device &&
+					   (0!=port.mouseMotion.x() || 0!=port.mouseMotion.y()))
+					{
+						portIdle=false;
+						break;
+					}
+				}
+				const bool ackX=
+				    true!=var.profileWaitFeedbackX ||
+				    mx!=var.profilePrevFeedbackX;
+				const bool ackY=
+				    true!=var.profileWaitFeedbackY ||
+				    my!=var.profilePrevFeedbackY;
+				++var.profileDeltaWait;
+				if(true==ackX && true==ackY)
+				{
+					var.profileDeltaInFlight=false;
+					return false;
+				}
+				if(true==portIdle &&
+				   var.profileDeltaWait>=PROFILE_DELTA_PORT_IDLE_GRACE)
+				{
+					var.profileDeltaInFlight=false;
+					return false;
+				}
+				if(var.profileDeltaWait>=PROFILE_DELTA_WAIT_MAX)
+				{
+					var.profileDeltaInFlight=false;
+					return false;
+				}
+				return true;
+			};
+
+			auto noteFeedbackSent=[&](bool waitFb)
+			{
+				if(true!=waitFb)
+				{
+					var.profileDeltaInFlight=false;
+					return;
+				}
+				bool sentX=false,sentY=false;
+				for(auto &port : gameport.state.ports)
+				{
+					if(TownsGamePort::MOUSE==port.device)
+					{
+						sentX=sentX || (0!=port.mouseMotion.x());
+						sentY=sentY || (0!=port.mouseMotion.y());
+					}
+				}
+				var.profilePrevFeedbackX=mx;
+				var.profilePrevFeedbackY=my;
+				var.profileWaitFeedbackX=sentX;
+				var.profileWaitFeedbackY=sentY;
+				var.profileDeltaInFlight=(sentX || sentY);
+				var.profileDeltaWait=0;
+			};
+
+			// MOS side under app-specific: immediate soft write (no grace / wait).
+			auto runMosImmediateWrite=[&](void)->bool
+			{
+				int mosHostX=rawHostX,mosHostY=rawHostY;
+				int originX=0,originY=0,zoom2xX=2,zoom2xY=2,page=0;
+				TransformHostMouseForIntegration(
+				    mosHostX,mosHostY,
+				    mosHostX,mosHostY,
+				    originX,originY,zoom2xX,zoom2xY,page);
+				diffX=mosHostX-mx;
+				diffY=mosHostY-my;
+				var.mouseCoordProfileApply=false;
+				const bool ok=SetMouseCoordinate(mosHostX,mosHostY,tbiosid);
+				var.mouseCoordProfileApply=true;
+				if(true==ok)
+				{
+					SyncMouseCursorSpritesToCoord(mosHostX,mosHostY);
+					SyncMouseCursorDrawCoordinate(mosHostX,mosHostY);
+				}
+				DontControlMouse();
+				return ok;
+			};
+
+			if(true==p.HasDirectWriteTarget())
+			{
+				// Absolute poke does not need a usable guest Phys read.  Game Phys often
+				// starts as signed junk; requiring GetMouseCoordinate first + store-guard
+				// deadlocks (host never writes, guest cannot init).
+				int mappedX=rawHostX;
+				int mappedY=rawHostY;
+				mouseCoordWriteScan.MapHostToProfileCoords(mappedX,mappedY);
+				// Offset only; invert mirrors the stored write (0..N → N..0) inside
+				// WriteAppCursorCoords / MapScreenToPairStored.
+				const int targetX=mappedX+p.offsetX;
+				const int targetY=mappedY+p.offsetY;
+				mouseCoordWriteScan.NoteDirectWriteDebug(
+				    rawHostX,rawHostY,mappedX,mappedY,
+				    p.offsetX,p.offsetY,p.invertX,p.invertY,
+				    targetX,targetY);
+				if(true==haveGuest)
+				{
+					diffX=targetX-mx;
+					diffY=targetY-my;
+				}
+				else
+				{
+					diffX=0;
+					diffY=0;
+				}
+				const bool wrotePhys=
+				    mouseCoordWriteScan.WriteAppCursorCoords(targetX,targetY);
+				if(true!=state.mouseBIOSActive)
+				{
+					var.profileDeltaInFlight=false;
+					DontControlMouse();
+					return wrotePhys;
+				}
+				if(true==p.stopSoftWrite)
+				{
+					var.profileDeltaInFlight=false;
+					DontControlMouse();
+					return wrotePhys;
+				}
+				return runMosImmediateWrite();
 			}
-			// At this time it only takes vertical displacement into account.
+			if(true!=haveGuest)
+			{
+				var.profileDeltaInFlight=false;
+				return false;
+			}
+			if(true==p.HasGameFeedbackTarget())
+			{
+				// Same map/offset/scale/phys as DW write (invert off on write).
+				// Invert: mirror guest Phys in span (0..N → N..0), then Δ=write−guest'.
+				int mappedX=0,mappedY=0,targetX=0,targetY=0;
+				int writeX=0,writeY=0,guestX=0,guestY=0;
+				MouseCoordWriteScan::CoordPair pair0;
+				if(true!=mouseCoordWriteScan.ComputeFirstPairStoredFromHost(
+				       rawHostX,rawHostY,
+				       mappedX,mappedY,targetX,targetY,
+				       writeX,writeY,guestX,guestY,pair0))
+				{
+					var.profileDeltaInFlight=false;
+					return false;
+				}
+				mouseCoordWriteScan.LogSoftCursorIfChanged(mx,my);
+				int screenW=0,screenH=0;
+				(void)mouseCoordWriteScan.TryGuestScreenSize(screenW,screenH);
+				int guestForDx=guestX;
+				int guestForDy=guestY;
+				if(true==p.invertX)
+				{
+					guestForDx=MouseCoordWriteScan::MirrorStoredAxis(
+					    guestX,pair0,screenW,true);
+				}
+				if(true==p.invertY)
+				{
+					guestForDy=MouseCoordWriteScan::MirrorStoredAxis(
+					    guestY,pair0,screenH,false);
+				}
+				diffX=writeX-guestForDx;
+				diffY=writeY-guestForDy;
+				// Suppress idle chatter: residual 1px errors otherwise refill the
+				// gameport every poll and look like diagonal bounce.
+				constexpr int GF_DEADZONE=1;
+				if(std::abs(diffX)<=GF_DEADZONE)
+				{
+					diffX=0;
+				}
+				if(std::abs(diffY)<=GF_DEADZONE)
+				{
+					diffY=0;
+				}
+				mouseCoordWriteScan.NoteGameFeedbackDebug(
+				    rawHostX,rawHostY,
+				    mappedX,mappedY,
+				    p.offsetX,p.offsetY,p.invertX,p.invertY,
+				    targetX,targetY,
+				    writeX,writeY,
+				    guestForDx,guestForDy,diffX,diffY,
+				    pair0);
+
+				// Phys GF: honor waitFeedback setting only (not forced by MOS).
+				if(true==waitFeedbackHold(p.waitFeedback))
+				{
+					return true;
+				}
+				if(0==diffX && 0==diffY)
+				{
+					var.profileDeltaInFlight=false;
+					DontControlMouse();
+					return true;
+				}
+				const bool gfOk=ControlMouseByDiff(diffX,diffY,tbiosid,slowDownRange);
+				noteFeedbackSent(p.waitFeedback);
+				if(true!=state.mouseBIOSActive || true==p.stopSoftWrite)
+				{
+					return gfOk;
+				}
+				// MOS alive: immediate soft write (independent of Phys gameport Δ).
+				(void)runMosImmediateWrite();
+				return true;
+			}
+			var.profileDeltaInFlight=false;
+		}
+		if(true!=haveGuest)
+		{
+			return false;
+		}
+
+		int originX=0,originY=0,zoom2xX=2,zoom2xY=2,page=0;
+		TransformHostMouseForIntegration(
+		    hostMouseX,hostMouseY,
+		    hostMouseX,hostMouseY,
+		    originX,originY,zoom2xX,zoom2xY,page);
+		if(TOWNS_APPSPECIFIC_LEMMINGS==state.appSpecificSetting)
+		{
+			slowDownRange=4;
 		}
 
 		diffX=hostMouseX-mx;
 		diffY=hostMouseY-my;
-		return ControlMouseByDiff(diffX,diffY,tbiosid,slowDownRange);
+		if(true==snap)
+		{
+			if(true==SetMouseCoordinate(hostMouseX,hostMouseY,tbiosid))
+			{
+				SyncMouseCursorSpritesToCoord(hostMouseX,hostMouseY);
+				SyncMouseCursorDrawCoordinate(hostMouseX,hostMouseY);
+				DontControlMouse();
+				return true;
+			}
+			// Mouse BIOS storage may not be ready yet at boot — use gradual integration.
+			const bool ok=ControlMouseByDiff(diffX,diffY,tbiosid,slowDownRange);
+			SyncMouseCursorSpritesToCoord(hostMouseX,hostMouseY);
+			SyncMouseCursorDrawCoordinate(hostMouseX,hostMouseY);
+			return ok;
+		}
+		const bool ok=ControlMouseByDiff(diffX,diffY,tbiosid,slowDownRange);
+		SyncMouseCursorSpritesToCoord(hostMouseX,hostMouseY);
+		SyncMouseCursorDrawCoordinate(hostMouseX,hostMouseY);
+		return ok;
+	}
+	return false;
+}
+
+void FMTownsCommon::SyncMouseCursorSpritesToCoord(int mx,int my)
+{
+	// Director / WC2 installer can leave the hardware cursor sprite's X out of sync with MOS
+	// (hit-testing).  On a quiet TOS desktop only a few sprites are active — rewrite X/Y for
+	// displayed sprites that share the mouse scanline so the picture matches MOS again.
+	// Sprite index coords are often half of MOS (256-plane / 2x CRTC zoom); Sc:-1 with SPEN
+	// on usually means the filter looked for full-scale Y only.
+	if(true!=state.mouseBIOSActive ||
+	   TOWNS_APPSPECIFIC_NONE!=state.appSpecificSetting ||
+	   true!=sprite.SPEN() ||
+	   true==crtc.state.highResCRTCEnabled)
+	{
+		return;
+	}
+	if(8<sprite.NumSpritesActuallyDrawn())
+	{
+		return;
+	}
+
+	auto *spriteRAM=physMem.state.spriteRAM;
+	const unsigned int xOff=sprite.HOffset();
+	const unsigned int yOff=sprite.VOffset();
+	for(unsigned int spriteIndex=sprite.FirstSpriteIndex();
+	    spriteIndex<TownsSprite::MAX_NUM_SPRITE_INDEX;
+	    ++spriteIndex)
+	{
+		auto *indexPtr=spriteRAM+(spriteIndex<<3);
+		const unsigned int paletteInfo=(unsigned int)(indexPtr[6]|(indexPtr[7]<<8));
+		if(0!=(paletteInfo&TownsSprite::PALETTE_DISP))
+		{
+			continue;
+		}
+		int dstX=(int)((indexPtr[0]|(indexPtr[1]<<8))&511);
+		int dstY=(int)((indexPtr[2]|(indexPtr[3]<<8))&511);
+		const unsigned int attrib=(unsigned int)(indexPtr[4]|(indexPtr[5]<<8));
+		if(0!=(attrib&TownsSprite::ATTR_OFFS))
+		{
+			dstX+=(int)xOff;
+			dstY+=(int)yOff;
+		}
+
+		// Match full-scale MOS Y, or half-scale sprite plane (Y≈MOS/2, common with 2x zoom).
+		const int dFull=std::abs(dstY-my);
+		const int dHalf=std::abs(dstY*2-my);
+		const bool halfScale=(dHalf<=2 && dHalf<dFull);
+		if(2<dFull && 2<dHalf)
+		{
+			continue;
+		}
+		const int goalX=(true==halfScale ? mx/2 : mx);
+		const int goalY=(true==halfScale ? my/2 : my);
+		if(dstX==goalX && dstY==goalY)
+		{
+			continue;
+		}
+		int writeX=goalX;
+		int writeY=goalY;
+		if(0!=(attrib&TownsSprite::ATTR_OFFS))
+		{
+			writeX-=(int)xOff;
+			writeY-=(int)yOff;
+		}
+		writeX&=511;
+		writeY&=511;
+		if(writeX<0)
+		{
+			writeX=0;
+		}
+		if(writeY<0)
+		{
+			writeY=0;
+		}
+		indexPtr[0]=(unsigned char)(writeX&0xFF);
+		indexPtr[1]=(unsigned char)((writeX>>8)&0x01);
+		indexPtr[2]=(unsigned char)(writeY&0xFF);
+		indexPtr[3]=(unsigned char)((writeY>>8)&0x01);
+	}
+}
+
+namespace
+{
+unsigned int MouseCursorDrawPhysicalAddr(const FMTownsCommon &towns)
+{
+	// Per-TBIOS layout only — never guess TBIOS+0x510 on V31L35 (that word is unrelated
+	// and writing it corrupts TBIOS; reads show as Cp:4864,10613-style garbage).
+	switch(towns.state.tbiosVersion)
+	{
+	case TBIOS_V31L31_92:
+	case TBIOS_V31L31_93:
+		// ES:[510H] is MOS_rdpos / cursor position for these revisions.
+		if(0!=towns.state.TBIOS_physicalAddr)
+		{
+			return towns.state.TBIOS_physicalAddr+0x510;
+		}
+		return 0;
+	case TBIOS_V31L35:
+		// Draw and rdpos share mouseInfo+0x0C/+0x0E — no separate CURSOR_POSITION.
+		if(0!=towns.state.TBIOS_physicalAddr && 0!=towns.state.TBIOS_mouseInfoOffset)
+		{
+			return towns.state.TBIOS_physicalAddr+towns.state.TBIOS_mouseInfoOffset+0x0C;
+		}
+		return 0;
+	default:
+		break;
+	}
+	return 0;
+}
+}
+
+bool FMTownsCommon::GetMouseCursorDrawCoordinate(int &mx,int &my) const
+{
+	const unsigned int phys=MouseCursorDrawPhysicalAddr(*this);
+	if(0==phys)
+	{
+		return false;
+	}
+	mx=(int)mem.FetchWord(phys);
+	my=(int)mem.FetchWord(phys+2);
+	return true;
+}
+
+void FMTownsCommon::SyncMouseCursorDrawCoordinate(int mx,int my)
+{
+	// V31L35 / V31L31_92 already get X/Y via SetMouseCoordinate into the same words
+	// MouseCursorDrawPhysicalAddr() would touch.  Extra writes are unnecessary; the old
+	// TBIOS+0x510 fallback actively corrupted V31L35 after Director titles.
+	(void)mx;
+	(void)my;
+}
+
+void FMTownsCommon::SyncMouseInfoPrevDrawToCurrent(void)
+{
+	if(0==state.TBIOS_physicalAddr || 0==state.TBIOS_mouseInfoOffset)
+	{
+		return;
+	}
+	const unsigned int base=state.TBIOS_physicalAddr+state.TBIOS_mouseInfoOffset;
+	const unsigned int x=mem.FetchWord(base+0x0C);
+	const unsigned int y=mem.FetchWord(base+0x0E);
+	// Clean TOS keeps +22/+24 at 0 — do not mirror position into those words.
+	mem.StoreWord(base+0x10,x);
+	mem.StoreWord(base+0x12,y);
+}
+
+bool FMTownsCommon::SetMouseCoordinate(int mx,int my,unsigned int tbiosid)
+{
+	struct SuppressMosProbe
+	{
+		FMTownsCommon::Variable &v;
+		SuppressMosProbe(FMTownsCommon::Variable &v):v(v)
+		{
+			v.suppressMosCoordReadProbe=true;
+		}
+		~SuppressMosProbe()
+		{
+			v.suppressMosCoordReadProbe=false;
+		}
+	} suppress(var);
+
+	if(true==crtc.state.highResCRTCEnabled && true==crtc.state.highResCrtcMouse.defined)
+	{
+		crtc.state.highResCrtcMouse.X=mx;
+		crtc.state.highResCrtcMouse.Y=my;
+		return true;
+	}
+
+	if(true==var.customMouseIntegration)
+	{
+		mem.StoreWord(state.appSpecific_MousePtrX,mx);
+		mem.StoreWord(state.appSpecific_MousePtrY,my);
+		return true;
+	}
+
+	if(true==var.mouseCoordProfileApply)
+	{
+		const auto p=mouseCoordWriteScan.GetActiveProfile();
+		// Direct-write: pair only (never soft).
+		if(true==p.HasDirectWriteTarget())
+		{
+			return mouseCoordWriteScan.WriteAppCursorCoords(mx,my);
+		}
+		if(true==p.HasGameFeedbackTarget())
+		{
+			// Game-port mode does not poke soft here; ControlMouse MOS snap
+			// clears profileApply before calling SetMouseCoordinate.
+			return false;
+		}
+	}
+
+	const bool useUltimaUnderworldMouse=(
+	    TOWNS_APPSPECIFIC_ULTIMAUNDERWORLD==state.appSpecificSetting &&
+	    0!=state.appSpecific_MousePtrX);
+
+	if(true==state.mouseBIOSActive && true!=useUltimaUnderworldMouse)
+	{
+		switch(tbiosid)
+		{
+		case TBIOS_V31L22A:
+			if(0==state.MOS_work_physicalAddr)
+			{
+				return false;
+			}
+			mem.StoreWord(state.MOS_work_physicalAddr+0x52,mx);
+			mem.StoreWord(state.MOS_work_physicalAddr+0x54,my);
+			return true;
+		case TBIOS_V31L23A:
+		case TBIOS_V31L31_90:
+			if(0==state.MOS_work_physicalAddr)
+			{
+				return false;
+			}
+			mem.StoreWord(state.MOS_work_physicalAddr+0x56,mx);
+			mem.StoreWord(state.MOS_work_physicalAddr+0x58,my);
+			return true;
+		case TBIOS_V31L31_91:
+			if(0==state.TBIOS_physicalAddr)
+			{
+				return false;
+			}
+			mem.StoreWord(state.TBIOS_physicalAddr+0x56C,mx);
+			mem.StoreWord(state.TBIOS_physicalAddr+0x56E,my);
+			return true;
+		case TBIOS_V31L31_92:
+		case TBIOS_V31L31_93:
+			if(0==state.TBIOS_physicalAddr)
+			{
+				return false;
+			}
+			mem.StoreWord(state.TBIOS_physicalAddr+0x510,mx);
+			mem.StoreWord(state.TBIOS_physicalAddr+0x512,my);
+			return true;
+		case TBIOS_V31L35:
+			{
+				bool wrote=false;
+				if(0!=state.TBIOS_physicalAddr && 0!=state.TBIOS_mouseInfoOffset)
+				{
+					mem.StoreWord(state.TBIOS_physicalAddr+state.TBIOS_mouseInfoOffset+0x0C,mx);
+					mem.StoreWord(state.TBIOS_physicalAddr+state.TBIOS_mouseInfoOffset+0x0E,my);
+					wrote=true;
+				}
+				if(0!=state.MOS_work_physicalAddr)
+				{
+					mem.StoreWord(state.MOS_work_physicalAddr+0x56,mx);
+					mem.StoreWord(state.MOS_work_physicalAddr+0x58,my);
+					wrote=true;
+				}
+				if(true!=wrote)
+				{
+					return false;
+				}
+				SyncMouseCursorDrawCoordinate(mx,my);
+				return true;
+			}
+		}
+	}
+	else
+	{
+		switch(state.appSpecificSetting)
+		{
+		case TOWNS_APPSPECIFIC_ULTIMAUNDERWORLD:
+			{
+				auto debugStop=CheckDebugBreak();
+				mem.StoreWord(state.appSpecific_MousePtrX,mx);
+				mem.StoreWord(state.appSpecific_MousePtrY,(399-my)/2);
+				SetDebugBreakFlag(debugStop);
+			}
+			return true;
+		case TOWNS_APPSPECIFIC_RASHINBAN:
+		case TOWNS_APPSPECIFIC_WINGCOMMANDER1:
+		case TOWNS_APPSPECIFIC_LEMMINGS:
+		case TOWNS_APPSPECIFIC_LEMMINGS2:
+		case TOWNS_APPSPECIFIC_OPERATIONWOLF:
+			{
+				auto debugStop=CheckDebugBreak();
+				mem.StoreWord(state.appSpecific_MousePtrX,mx);
+				mem.StoreWord(state.appSpecific_MousePtrY,my);
+				SetDebugBreakFlag(debugStop);
+			}
+			return true;
+		case TOWNS_APPSPECIFIC_WINGCOMMANDER2:
+			{
+				auto debugStop=CheckDebugBreak();
+				mem.StoreWord(state.appSpecific_MousePtrX,mx);
+				mem.StoreWord(state.appSpecific_MousePtrY,my);
+				SetDebugBreakFlag(debugStop);
+			}
+			return true;
+		case TOWNS_APPSPECIFIC_STRIKECOMMANDER:
+			{
+				auto debugStop=CheckDebugBreak();
+				mem.StoreWord(state.appSpecific_MousePtrX,mx*2);
+				mem.StoreWord(state.appSpecific_MousePtrY,my);
+				SetDebugBreakFlag(debugStop);
+			}
+			return true;
+		case TOWNS_APPSPECIFIC_BRANDISH:
+			{
+				auto debugStop=CheckDebugBreak();
+				mem.StoreWord(0x30000+0x40E6,mx);
+				mem.StoreWord(0x30000+0x40E8,my);
+				SetDebugBreakFlag(debugStop);
+			}
+			return true;
+		case TOWNS_APPSPECIFIC_AMARANTH3:
+			{
+				const uint32_t signature[]=
+				{
+					0x000B0E8B,
+					0x0095E8FA
+				};
+				const int32_t mouseCoordObserved=0x248F0+0x0040;
+				const int32_t readMouseProcObserved=0x24940+0x044E;
+				const int32_t physAddrOffset=mouseCoordObserved-readMouseProcObserved;
+
+				for(uint32_t addr=0x24000; addr<=0x24FFF; addr+=0x10)
+				{
+					if(signature[0]==mem.FetchDword(addr+0x44E) &&
+					   signature[1]==mem.FetchDword(addr+0x452))
+					{
+						auto debugStop=CheckDebugBreak();
+						mem.StoreWord(int(addr+0x44E)+physAddrOffset,mx);
+						mem.StoreWord(int(addr+0x44E)+physAddrOffset+2,my);
+						SetDebugBreakFlag(debugStop);
+						return true;
+					}
+				}
+			}
+			break;
+		}
 	}
 	return false;
 }
@@ -728,7 +1415,7 @@ bool FMTownsCommon::ControlMouseInVMCoord(int goalMouseX,int goalMouseY,unsigned
 	return false;
 }
 
-bool FMTownsCommon::ControlMouseByDiff(int diffX,int diffY,unsigned int tbiosid,int slowDownRange)
+bool FMTownsCommon::ControlMouseByDiff(int diffX,int diffY,unsigned int tbiosid,int slowDownRange,bool instant)
 {
 	if(state.MOS_pulsePerPixelH<8)
 	{
@@ -741,34 +1428,44 @@ bool FMTownsCommon::ControlMouseByDiff(int diffX,int diffY,unsigned int tbiosid,
 		diffY/=8;
 	}
 
-	int speed=state.mouseIntegrationSpeed;
-	if(TOWNS_APPSPECIFIC_OPERATIONWOLF==state.appSpecificSetting)
+	int dx,dy;
+	if(true==instant)
 	{
-		speed*=2;
+		// Already shaped by caller (ClampStep).  Only enforce gameport ±127.
+		dx=std::max(std::min(diffX,127),-127);
+		dy=std::max(std::min(diffY,127),-127);
 	}
+	else
+	{
+		int speed=state.mouseIntegrationSpeed;
+		if(TOWNS_APPSPECIFIC_OPERATIONWOLF==state.appSpecificSetting)
+		{
+			speed*=2;
+		}
 
-	auto dx=ScaleStep(ClampStep(diffX),speed);
-	auto dy=ScaleStep(ClampStep(diffY),speed);
-	if(-slowDownRange<=dx && dx<=slowDownRange)
-	{
-		if(dx<0)
+		dx=ScaleStep(ClampStep(diffX),speed);
+		dy=ScaleStep(ClampStep(diffY),speed);
+		if(-slowDownRange<=dx && dx<=slowDownRange)
 		{
-			dx=-1;
+			if(dx<0)
+			{
+				dx=-1;
+			}
+			else if(0<dx)
+			{
+				dx=1;
+			}
 		}
-		else if(0<dx)
+		if(-slowDownRange<=dy && dy<=slowDownRange)
 		{
-			dx=1;
-		}
-	}
-	if(-slowDownRange<=dy && dy<=slowDownRange)
-	{
-		if(dy<0)
-		{
-			dy=-1;
-		}
-		else if(0<dy)
-		{
-			dy=1;
+			if(dy<0)
+			{
+				dy=-1;
+			}
+			else if(0<dy)
+			{
+				dy=1;
+			}
 		}
 	}
 	for(auto &p : gameport.state.ports)
@@ -982,6 +1679,19 @@ uint32_t FMTownsCommon::GetMouseXYOffsetInMOSWork(unsigned int tbiosid) const
 
 bool FMTownsCommon::GetMouseCoordinate(int &mx,int &my,unsigned int tbiosid) const
 {
+	struct SuppressMosProbe
+	{
+		const FMTownsCommon::Variable &v;
+		SuppressMosProbe(const FMTownsCommon::Variable &v):v(v)
+		{
+			v.suppressMosCoordReadProbe=true;
+		}
+		~SuppressMosProbe()
+		{
+			v.suppressMosCoordReadProbe=false;
+		}
+	} suppress(var);
+
 	// Windows 3.1 >>
 	// Actually FMT-3631 does not know where in the pattern is mouse cursor position, and it changes.
 	// The cursor shakes at the corner of the window.  Better to go with TGMOUSE.
@@ -1014,14 +1724,30 @@ bool FMTownsCommon::GetMouseCoordinate(int &mx,int &my,unsigned int tbiosid) con
 		return true;
 	}
 
+	if(true==var.mouseCoordProfileApply)
+	{
+		const auto p=mouseCoordWriteScan.GetActiveProfile();
+		if(true==p.HasDirectWriteTarget() || true==p.HasGameFeedbackTarget())
+		{
+			return mouseCoordWriteScan.ReadProfileCoords(mx,my);
+		}
+	}
+
 	// Custom Mouse Integration <<
 
-	if(true==state.mouseBIOSActive &&
-	   TOWNS_APPSPECIFIC_ULTIMAUNDERWORLD!=state.appSpecificSetting)
+	const bool useUltimaUnderworldMouse=(
+	    TOWNS_APPSPECIFIC_ULTIMAUNDERWORLD==state.appSpecificSetting &&
+	    0!=state.appSpecific_MousePtrX);
+
+	if(true==state.mouseBIOSActive && true!=useUltimaUnderworldMouse)
 	{
 		switch(tbiosid)
 		{
 		case TBIOS_V31L22A:
+			if(0==state.MOS_work_physicalAddr)
+			{
+				return false;
+			}
 			// 0110:0000FA88 8A6F44                    MOV     CH,[EDI+44H]
 			// 0110:0000FA8B 8B5752                    MOV     EDX,[EDI+52H]
 			// 0110:0000FA8E 0FA4D310                  SHLD    EBX,EDX,10H
@@ -1033,6 +1759,10 @@ bool FMTownsCommon::GetMouseCoordinate(int &mx,int &my,unsigned int tbiosid) con
 			my=(int)mem.FetchWord(state.MOS_work_physicalAddr+0x54);
 			return true;
 		case TBIOS_V31L23A:
+			if(0==state.MOS_work_physicalAddr)
+			{
+				return false;
+			}
 			// 0110:000103B8 8A6F44                    MOV     CH,[EDI+44H]
 			// 0110:000103BB 8B5756                    MOV     EDX,[EDI+56H]
 			// 0110:000103BE 0FA4D310                  SHLD    EBX,EDX,10H
@@ -1044,6 +1774,10 @@ bool FMTownsCommon::GetMouseCoordinate(int &mx,int &my,unsigned int tbiosid) con
 			my=(int)mem.FetchWord(state.MOS_work_physicalAddr+0x58);
 			return true;
 		case TBIOS_V31L31_90:
+			if(0==state.MOS_work_physicalAddr)
+			{
+				return false;
+			}
 			// 0110:000103B8 8A6F44                    MOV     CH,[EDI+44H]
 			// 0110:000103BB 8B5756                    MOV     EDX,[EDI+56H]
 			// 0110:000103BE 0FA4D310                  SHLD    EBX,EDX,10H
@@ -1055,6 +1789,10 @@ bool FMTownsCommon::GetMouseCoordinate(int &mx,int &my,unsigned int tbiosid) con
 			my=(int)mem.FetchWord(state.MOS_work_physicalAddr+0x58);
 			return true;
 		case TBIOS_V31L31_91:
+			if(0==state.TBIOS_physicalAddr)
+			{
+				return false;
+			}
 			// 0110:00011064 648A2D1C050000            MOV     CH,FS:[0000051CH]
 			// 0110:0001106B 648B156C050000            MOV     EDX,FS:[0000056CH]
 			// 0110:00011072 0FA4D310                  SHLD    EBX,EDX,10H
@@ -1067,6 +1805,10 @@ bool FMTownsCommon::GetMouseCoordinate(int &mx,int &my,unsigned int tbiosid) con
 			return true;
 		case TBIOS_V31L31_92:
 		case TBIOS_V31L31_93:
+			if(0==state.TBIOS_physicalAddr)
+			{
+				return false;
+			}
 			// 0110:00011D50 268A2D28050000            MOV     CH,ES:[00000528H]
 			// 0110:00011D57 268B1510050000            MOV     EDX,ES:[00000510H]
 			// 0110:00011D5E 0FA4D310                  SHLD    EBX,EDX,10H
@@ -1077,30 +1819,24 @@ bool FMTownsCommon::GetMouseCoordinate(int &mx,int &my,unsigned int tbiosid) con
 			my=(int)mem.FetchWord(state.TBIOS_physicalAddr+0x512);
 			return true;
 		case TBIOS_V31L35:
-			// V2.1 L31
-			// 0110:00014B2B BF804A0100                MOV     EDI,00014A80H
-
-			// 0110:00014C94 8A6F1C                    MOV     CH,[EDI+1CH]
-			// 0110:00014C97 8B570C                    MOV     EDX,[EDI+0CH]
-			// 0110:00014C9A 0FA4D310                  SHLD    EBX,EDX,10H
-			// 0110:00014C9E 886D1D                    MOV     [EBP+1DH],CH
-			// 0110:00014CA1 66895518                  MOV     [EBP+18H],DX
-			// 0110:00014CA5 66895D14                  MOV     [EBP+14H],BX
-			// 0110:00014CA9 C3                        RET
-
-			// V2.1 L50
-			// 0110:000162C8 BF30620100                MOV     EDI,00016230H
-
-			// 0110:0001643C 8A6F1C                    MOV     CH,[EDI+1CH]
-			// 0110:0001643F 8B570C                    MOV     EDX,[EDI+0CH]
-			// 0110:00016442 0FA4D310                  SHLD    EBX,EDX,10H
-			// 0110:00016446 886D1D                    MOV     [EBP+1DH],CH
-			// 0110:00016449 66895518                  MOV     [EBP+18H],DX
-			// 0110:0001644D 66895D14                  MOV     [EBP+14H],BX
-			// 0110:00016451 C3                        RET
-			mx=(int)mem.FetchWord(state.TBIOS_physicalAddr+state.TBIOS_mouseInfoOffset+0x0C);
-			my=(int)mem.FetchWord(state.TBIOS_physicalAddr+state.TBIOS_mouseInfoOffset+0x0E);
-			return true;
+			// V2.1 L31 / L50 — mouse X/Y at [EDI+0CH] / [EDI+0EH]
+			{
+				bool got=false;
+				if(0!=state.TBIOS_physicalAddr && 0!=state.TBIOS_mouseInfoOffset)
+				{
+					mx=(int)mem.FetchWord(state.TBIOS_physicalAddr+state.TBIOS_mouseInfoOffset+0x0C);
+					my=(int)mem.FetchWord(state.TBIOS_physicalAddr+state.TBIOS_mouseInfoOffset+0x0E);
+					got=true;
+				}
+				if(0!=state.MOS_work_physicalAddr &&
+				   (0==state.TBIOS_mouseInfoOffset || (0==mx && 0==my)))
+				{
+					mx=(int)mem.FetchWord(state.MOS_work_physicalAddr+0x56);
+					my=(int)mem.FetchWord(state.MOS_work_physicalAddr+0x58);
+					got=true;
+				}
+				return got;
+			}
 		}
 	}
 	else

@@ -13,6 +13,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 
 << LICENSE */
 #include <iostream>
+#include <sstream>
 #include <math.h>
 #include "discimg.h"
 #include "cdrom.h"
@@ -40,29 +41,163 @@ unsigned int TownsCDROM::AsyncWaveReader::GetState(void)
 }
 void TownsCDROM::AsyncWaveReader::Start(DiscImage *discImg,DiscImage::MinSecFrm from,DiscImage::MinSecFrm to)
 {
-	if(STATE_IDLE!=GetState())
+	auto st=GetState();
+	if(STATE_BUSY==st)
+	{
+		stateLock.lock();
+		this->discImg=discImg;
+		this->from=from;
+		this->to=to;
+		restartRequested=true;
+		cancelRequested=false;
+		stateLock.unlock();
+		return;
+	}
+	if(STATE_DATAREADY==st)
+	{
+		thr.join();
+		state=STATE_IDLE;
+	}
+	else if(STATE_IDLE!=st)
 	{
 		thr.join(); // Just in case.  Flush the last task.
 	}
 	this->discImg=discImg;
 	this->from=from;
 	this->to=to;
+	restartRequested=false;
+	cancelRequested=false;
 	this->state=STATE_BUSY;
 	std::thread t(&TownsCDROM::AsyncWaveReader::ThreadFunc,this);
 	std::swap(t,thr);
 }
 std::vector <unsigned char> &TownsCDROM::AsyncWaveReader::GetWave(void)
 {
-	thr.join();
+	if(STATE_IDLE!=GetState())
+	{
+		thr.join();
+	}
+	restartRequested=false;
+	cancelRequested=false;
 	state=STATE_IDLE;
 	return wave;
 }
+void TownsCDROM::AsyncWaveReader::RequestCancel(void)
+{
+	stateLock.lock();
+	const int st=state;
+	if(STATE_IDLE==st)
+	{
+		cancelRequested=false;
+		restartRequested=false;
+		stateLock.unlock();
+		return;
+	}
+	cancelRequested=true;
+	restartRequested=false;
+	stateLock.unlock();
+
+	if(STATE_DATAREADY==st)
+	{
+		// Thread already finished — reclaim without leaving a stale ready buffer.
+		thr.join();
+		stateLock.lock();
+		wave.clear();
+		cancelRequested=false;
+		restartRequested=false;
+		state=STATE_IDLE;
+		stateLock.unlock();
+	}
+	// STATE_BUSY: ThreadFunc drops the result after the current chunk returns.
+}
 void TownsCDROM::AsyncWaveReader::ThreadFunc(void)
 {
-	wave=discImg->GetWave(from,to);
-	stateLock.lock();
-	state=STATE_DATAREADY;
-	stateLock.unlock();
+	// Chunked prefetch so RequestCancel can release the disc for MODE.
+	// CUE/ISO: larger chunks (1s) — open/seek overhead dominates; cancel within ~1s is enough.
+	// CHD: keep small chunks — hunk decompress is slower per call.
+	for(;;)
+	{
+		DiscImage *img;
+		DiscImage::MinSecFrm rangeFrom,rangeTo;
+		stateLock.lock();
+		img=discImg;
+		rangeFrom=from;
+		rangeTo=to;
+		stateLock.unlock();
+
+		const unsigned int chunkFrames=
+		    (nullptr!=img && DiscImage::FILETYPE_CHD!=img->fileType) ? 75u : 4u;
+
+		wave.clear();
+		unsigned int curHSG=rangeFrom.ToHSG();
+		unsigned int endHSG=rangeTo.ToHSG();
+		bool restart=false;
+
+		while(curHSG<endHSG)
+		{
+			stateLock.lock();
+			if(true==cancelRequested)
+			{
+				cancelRequested=false;
+				restartRequested=false;
+				wave.clear();
+				state=STATE_IDLE;
+				stateLock.unlock();
+				return;
+			}
+			if(true==restartRequested)
+			{
+				restartRequested=false;
+				img=discImg;
+				rangeFrom=from;
+				rangeTo=to;
+				stateLock.unlock();
+				restart=true;
+				break;
+			}
+			stateLock.unlock();
+
+			unsigned int nextHSG=curHSG+chunkFrames;
+			if(endHSG<nextHSG)
+			{
+				nextHSG=endHSG;
+			}
+			DiscImage::MinSecFrm chunkFrom,chunkTo;
+			chunkFrom.FromHSG(curHSG);
+			chunkTo.FromHSG(nextHSG);
+			auto chunk=img->GetWave(chunkFrom,chunkTo);
+			if(true!=chunk.empty())
+			{
+				wave.insert(wave.end(),chunk.begin(),chunk.end());
+			}
+			curHSG=nextHSG;
+		}
+
+		if(true==restart)
+		{
+			continue;
+		}
+
+		stateLock.lock();
+		if(true==cancelRequested)
+		{
+			cancelRequested=false;
+			restartRequested=false;
+			wave.clear();
+			state=STATE_IDLE;
+			stateLock.unlock();
+			return;
+		}
+		if(true==restartRequested)
+		{
+			restartRequested=false;
+			stateLock.unlock();
+			continue;
+		}
+		state=STATE_DATAREADY;
+		stateLock.unlock();
+		return;
+	}
 }
 
 ////////////////////////////////////////////////////////////
@@ -86,6 +221,8 @@ DiscImage &TownsCDROM::State::GetDisc(void)
 void TownsCDROM::State::ClearStatusQueue(void)
 {
 	statusQueue.clear();
+	completionSIRQSticky=false;
+	smicWhileCompletionSticky=false;
 }
 void TownsCDROM::State::PushStatusQueue(unsigned char d0,unsigned char d1,unsigned char d2,unsigned char d3)
 {
@@ -103,9 +240,37 @@ void TownsCDROM::State::Reset(void)
 	CDDAState=CDDA_IDLE;
 	nextCDDAPollingTime=0;
 	CDDAEndTime.Set(0,2,0);
+	CDDARepeat=false;
 
 	CDDAWave.clear();
 	CDDAPlayPointer=0;
+	CDDAAudioOutput=false;
+	CDDAWaveBaseTime.Set(0,0,0);
+	CDDAWaveBaseTrack=0;
+	guestPlayAnchorHSG=0;
+	guestPlayAnchorTownsTime=0;
+	CDDAPauseDiscHSG=0;
+	CDDAPauseDiscValid=false;
+	CDDAHostSamplesMixed=0;
+	CDDACacheStopAfterHostSamples=0;
+	CDDACacheHostStoppedByGrace=false;
+	CDDACacheBridgingDataRead=false;
+	CDDACacheAwaitModeAfterPause=false;
+	CDDAStateBeforeDataRead=CDDA_IDLE;
+	CDDAFixedLbaPolling=false;
+	modePollRingUsed=0;
+	modePollRingNext=0;
+	for(unsigned i=0; i<MODE_POLL_RING; ++i)
+	{
+		modePollHsg[i]=0;
+		modePollSectors[i]=0;
+	}
+	dataTransferActive=false;
+	dataTransferCmd=0;
+	CDDAPrefetchWaitForMode=false;
+	modeDeferredSeekTime=0;
+	modeSectorEmptyRetries=0;
+	dataReadyCheckbacks=0;
 
 	lidClosed=true;
 	lidLocked=false;
@@ -114,17 +279,144 @@ void TownsCDROM::State::Reset(void)
 void TownsCDROM::UpdateCDDAStateInternal(long long int townsTime)
 {
 	state.nextCDDAPollingTime=townsTime+CDDA_POLLING_INTERVAL;
+
+	// Guest natural end from silent playhead (not host PCM pointer).
 	if(CDDA_PLAYING==state.CDDAState)
 	{
-		if(state.CDDAWave.size()<=state.CDDAPlayPointer)
+		const unsigned endHSG=state.CDDAEndTime.ToHSG();
+		const unsigned absHSG=GuestAbsHSG(townsTime);
+		if(0!=endHSG && absHSG>=endHSG)
 		{
-			state.CDDAState=CDDA_STOPPING;
+			if(true==state.CDDARepeat)
+			{
+				GuestStartPlay(state.CDDAStartTime,state.CDDAEndTime,true,townsTime);
+				if(true==var.cddaCacheDuringDataRead && true==CacheWaveRemaining())
+				{
+					state.CDDAPlayPointer=0;
+					state.CDDAAudioOutput=true;
+				}
+			}
+			else
+			{
+				// Latch playhead at end so STOPPING/ENDED SubQ does not jump to begin.
+				state.guestPlayAnchorHSG=endHSG;
+				state.guestPlayAnchorTownsTime=0;
+				state.CDDAState=CDDA_STOPPING;
+				state.CDDAAudioOutput=false;
+			}
 		}
 	}
 	else if(CDDA_STOPPING==state.CDDAState)
 	{
 		state.CDDAState=CDDA_ENDED;
 	}
+
+	// Host grace / await-MODE (sample clock); may discard host wave only.
+	if(0!=state.CDDACacheStopAfterHostSamples &&
+	   state.CDDAHostSamplesMixed>=state.CDDACacheStopAfterHostSamples)
+	{
+		CacheOnStopDeadlineReached();
+	}
+
+	// Host wave exhausted while still mixing: mute host only.
+	if(true==state.CDDAAudioOutput &&
+	   state.CDDAWave.size()<=state.CDDAPlayPointer)
+	{
+		if(true!=state.CDDAWave.empty() && true==state.CDDARepeat)
+		{
+			state.CDDAPlayPointer=0;
+		}
+		else if(true!=state.CDDAWave.empty())
+		{
+			state.CDDAAudioOutput=false;
+		}
+	}
+}
+
+unsigned int TownsCDROM::GuestAbsHSG(long long int townsTime) const
+{
+	if(CDDA_PAUSED==state.CDDAState && true==state.CDDAPauseDiscValid)
+	{
+		return state.CDDAPauseDiscHSG;
+	}
+	// STOPPING/ENDED: sit on commanded end (RAYXANBER / Done 07), not play start.
+	if(CDDA_STOPPING==state.CDDAState || CDDA_ENDED==state.CDDAState)
+	{
+		const unsigned endHSG=state.CDDAEndTime.ToHSG();
+		return (0!=endHSG) ? endHSG : state.guestPlayAnchorHSG;
+	}
+	if(CDDA_PLAYING!=state.CDDAState)
+	{
+		if(true==state.CDDAPauseDiscValid)
+		{
+			return state.CDDAPauseDiscHSG;
+		}
+		return state.CDDAEndTime.ToHSG();
+	}
+	const unsigned endHSG=state.CDDAEndTime.ToHSG();
+	unsigned absHSG=state.guestPlayAnchorHSG;
+	if(0!=state.guestPlayAnchorTownsTime &&
+	   townsTime>static_cast<long long>(state.guestPlayAnchorTownsTime))
+	{
+		const unsigned long long dt=
+		    static_cast<unsigned long long>(townsTime)-state.guestPlayAnchorTownsTime;
+		const unsigned long long frames=dt/(1000000000ull/75ull);
+		absHSG=state.guestPlayAnchorHSG+static_cast<unsigned>(frames);
+	}
+	if(0!=endHSG && absHSG>endHSG)
+	{
+		absHSG=endHSG;
+	}
+	return absHSG;
+}
+
+void TownsCDROM::GuestStartPlay(
+    DiscImage::MinSecFrm msfBegin,DiscImage::MinSecFrm msfEnd,bool repeat,long long int townsTime)
+{
+	state.CDDAState=CDDA_PLAYING;
+	state.CDDAStartTime=msfBegin;
+	state.CDDAEndTime=msfEnd;
+	state.CDDARepeat=repeat;
+	state.CDDAPauseDiscValid=false;
+	state.guestPlayAnchorHSG=msfBegin.ToHSG();
+	state.guestPlayAnchorTownsTime=static_cast<unsigned long long>(townsTime);
+}
+
+void TownsCDROM::GuestPause(long long int townsTime)
+{
+	const unsigned absHSG=GuestAbsHSG(townsTime);
+	state.CDDAState=CDDA_PAUSED;
+	state.CDDAPauseDiscHSG=absHSG;
+	state.CDDAPauseDiscValid=true;
+	state.guestPlayAnchorHSG=absHSG;
+	state.guestPlayAnchorTownsTime=0;
+}
+
+void TownsCDROM::GuestResume(long long int townsTime)
+{
+	if(CDDA_PAUSED!=state.CDDAState)
+	{
+		return;
+	}
+	unsigned absHSG=state.CDDAPauseDiscValid ? state.CDDAPauseDiscHSG : GuestAbsHSG(townsTime);
+	state.CDDAState=CDDA_PLAYING;
+	state.CDDAPauseDiscValid=false;
+	state.guestPlayAnchorHSG=absHSG;
+	state.guestPlayAnchorTownsTime=static_cast<unsigned long long>(townsTime);
+}
+
+void TownsCDROM::GuestStopToEnded(void)
+{
+	state.CDDAState=CDDA_ENDED;
+	state.CDDAPauseDiscValid=false;
+	state.guestPlayAnchorTownsTime=0;
+}
+
+void TownsCDROM::GuestStopToIdle(void)
+{
+	state.CDDAState=CDDA_IDLE;
+	state.CDDAPauseDiscValid=false;
+	state.guestPlayAnchorTownsTime=0;
 }
 
 void TownsCDROM::State::ResetMPU(void)
@@ -140,7 +432,13 @@ void TownsCDROM::State::ResetMPU(void)
 	for(int i=0; i<8; ++i)
 	{
 		paramQueue[i]=0;
+		delayedParam[i]=0;
 	}
+	delayedCmd=0;
+	delayedSIRQ=false;
+	completionSIRQSticky=false;
+	smicWhileCompletionSticky=false;
+	dataReadyCheckbacks=0;
 	readingSectorHSG=0;
 	endSectorHSG=0;
 	headPositionHSG=0;
@@ -171,6 +469,787 @@ void TownsCDROM::WaitUntilAsyncWaveReaderFinished(void)
 	{
 		waveReader.GetWave(); // This will join the thread.
 	}
+}
+
+bool TownsCDROM::CDDAAudioShouldOutput(void) const
+{
+	return state.CDDAAudioOutput && !state.CDDAWave.empty() && state.CDDAPlayPointer<state.CDDAWave.size();
+}
+
+void TownsCDROM::DiscardCDDAWaveCache(void)
+{
+	state.CDDAWave.clear();
+	state.CDDAPlayPointer=0;
+	state.CDDAAudioOutput=false;
+	state.CDDAWaveBaseTime.Set(0,0,0);
+	state.CDDAWaveBaseTrack=0;
+	state.CDDAHostSamplesMixed=0;
+	state.CDDACacheStopAfterHostSamples=0;
+	state.CDDACacheHostStoppedByGrace=false;
+	state.CDDACacheBridgingDataRead=false;
+	state.CDDACacheAwaitModeAfterPause=false;
+	state.CDDAStateBeforeDataRead=CDDA_IDLE;
+	ModePollClear();
+	state.CDDAPrefetchWaitForMode=false;
+	state.modeDeferredSeekTime=0;
+	state.modeSectorEmptyRetries=0;
+	WaitUntilAsyncWaveReaderFinished();
+}
+
+void TownsCDROM::DiscardHostCDDACacheForStateLoad(void)
+{
+	// Keep CDDAState / CDDAWaveBaseTime / CDDAAudioOutput for Resume.
+	// Play pointer is recomputed there from GuestAbsHSG vs WaveBase.
+	state.CDDAWave.clear();
+	state.CDDAWaveBaseTrack=0;
+	state.CDDAHostSamplesMixed=0;
+	state.CDDACacheStopAfterHostSamples=0;
+	state.CDDACacheHostStoppedByGrace=false;
+	state.CDDACacheBridgingDataRead=false;
+	state.CDDACacheAwaitModeAfterPause=false;
+	state.CDDAStateBeforeDataRead=CDDA_IDLE;
+	ModePollClear();
+	state.CDDAPrefetchWaitForMode=false;
+	state.modeDeferredSeekTime=0;
+	state.modeSectorEmptyRetries=0;
+	WaitUntilAsyncWaveReaderFinished();
+}
+
+void TownsCDROM::DiscardCacheOnAppExit(const char *reason)
+{
+	if(true!=var.cddaCacheDuringDataRead)
+	{
+		return;
+	}
+	if(true==state.CDDAWave.empty() &&
+	   true!=state.CDDAAudioOutput &&
+	   true!=state.CDDACacheBridgingDataRead)
+	{
+		return;
+	}
+	{
+		std::ostringstream oss;
+		oss << "[CACHE] discard on app exit ("
+		    << (nullptr!=reason ? reason : "?") << ")"
+		    << " cdda=" << state.CDDAState
+		    << " ptr=" << state.CDDAPlayPointer << "/" << state.CDDAWave.size();
+		LogMonitorLine(oss.str());
+	}
+	// Guest may stay PAUSED with frozen SubQ; only host RAM wave goes away.
+	DiscardCDDAWaveCache();
+}
+
+bool TownsCDROM::CacheWaveRemaining(void) const
+{
+	const auto alignedWaveSize=(state.CDDAWave.size()+3)&~3;
+	return true!=state.CDDAWave.empty() && state.CDDAPlayPointer<alignedWaveSize;
+}
+
+bool TownsCDROM::CacheHostMixAfterDataRead(void)
+{
+	if(true==state.CDDAWave.empty())
+	{
+		state.CDDAAudioOutput=false;
+		return false;
+	}
+	if(true!=CacheWaveRemaining())
+	{
+		if(true==state.CDDARepeat)
+		{
+			state.CDDAPlayPointer=0;
+		}
+		else
+		{
+			state.CDDAAudioOutput=false;
+			return false;
+		}
+	}
+	state.CDDAAudioOutput=true;
+	return true;
+}
+
+void TownsCDROM::CacheClearStopDeadline(void)
+{
+	state.CDDACacheStopAfterHostSamples=0;
+}
+
+void TownsCDROM::CacheArmStopIfNoPlay(void)
+{
+	const unsigned int graceSec=0<var.cddaCachePostReadGraceSec ? var.cddaCachePostReadGraceSec : 1u;
+	// Count real host-mixed audio, not townsTime (payback can skip seconds of VM time
+	// while the wave pointer barely moves — that was discarding mid-bridge).
+	const uint64_t graceSamples=static_cast<uint64_t>(graceSec)*static_cast<uint64_t>(CDDA_SAMPLING_RATE);
+	state.CDDACacheStopAfterHostSamples=state.CDDAHostSamplesMixed+graceSamples;
+}
+
+void TownsCDROM::CacheArmAwaitModeAfterPause(void)
+{
+	// Same grace window as post-MODE: PAUSE must be followed by MODE "soon"
+	// or it is treated as a standalone PAUSE (discard cache).
+	state.CDDACacheAwaitModeAfterPause=true;
+	CacheArmStopIfNoPlay();
+}
+
+bool TownsCDROM::ModeIsShortPollRead(unsigned int numSectors) const
+{
+	return 0<numSectors && numSectors<=8u;
+}
+
+void TownsCDROM::ModePollClear(void)
+{
+	state.CDDAFixedLbaPolling=false;
+	state.modePollRingUsed=0;
+	state.modePollRingNext=0;
+	for(unsigned i=0; i<State::MODE_POLL_RING; ++i)
+	{
+		state.modePollHsg[i]=0;
+		state.modePollSectors[i]=0;
+	}
+}
+
+bool TownsCDROM::ModePollNoteShortRead(unsigned int hsg0,unsigned int numSectors)
+{
+	if(true!=ModeIsShortPollRead(numSectors))
+	{
+		return false;
+	}
+	state.modePollHsg[state.modePollRingNext]=hsg0;
+	state.modePollSectors[state.modePollRingNext]=numSectors;
+	state.modePollRingNext=(state.modePollRingNext+1u)%State::MODE_POLL_RING;
+	if(state.modePollRingUsed<State::MODE_POLL_RING)
+	{
+		++state.modePollRingUsed;
+	}
+
+	constexpr unsigned nearHSG=16u;
+	unsigned unique=0;
+	unsigned revisited=0;
+	for(unsigned i=0; i<state.modePollRingUsed; ++i)
+	{
+		const unsigned h=state.modePollHsg[i];
+		bool seen=false;
+		for(unsigned j=0; j<i; ++j)
+		{
+			const unsigned hj=state.modePollHsg[j];
+			const unsigned d=(h>hj) ? (h-hj) : (hj-h);
+			if(d<=nearHSG)
+			{
+				seen=true;
+				break;
+			}
+		}
+		if(true!=seen)
+		{
+			++unique;
+		}
+	}
+	for(unsigned i=0; i+1<state.modePollRingUsed; ++i)
+	{
+		const unsigned h=state.modePollHsg[i];
+		const unsigned d=(hsg0>h) ? (hsg0-h) : (h-hsg0);
+		if(d<=nearHSG)
+		{
+			++revisited;
+			break;
+		}
+	}
+
+	const bool poll=
+	    state.modePollRingUsed<=2u ||
+	    unique<=12u ||
+	    0<revisited ||
+	    true==state.CDDAFixedLbaPolling;
+	if(true==poll)
+	{
+		state.CDDAFixedLbaPolling=true;
+	}
+	return poll;
+}
+
+bool TownsCDROM::ModePollShouldKeepHostMix(
+    unsigned int hsg0,unsigned int /*hsg1*/,unsigned int numSectors,unsigned int guestBefore)
+{
+	// Host-only: whether PCM should keep mixing through this MODE.
+	// Guest CDC is handled separately (PLAYING → IDLE on non-keep MODE).
+	if(true!=var.cddaCacheDuringDataRead)
+	{
+		return false;
+	}
+	if(CDDA_PLAYING!=guestBefore && CDDA_PAUSED!=guestBefore &&
+	   true!=state.CDDACacheAwaitModeAfterPause)
+	{
+		return false;
+	}
+	if(true==state.CDDAWave.empty())
+	{
+		return false;
+	}
+
+	if(CDDA_PAUSED==guestBefore || true==state.CDDACacheAwaitModeAfterPause)
+	{
+		if(true==ModeIsShortPollRead(numSectors))
+		{
+			(void)ModePollNoteShortRead(hsg0,numSectors);
+		}
+		else
+		{
+			state.CDDAFixedLbaPolling=true;
+		}
+		return true;
+	}
+
+	if(true!=ModeIsShortPollRead(numSectors))
+	{
+		ModePollClear();
+		return false;
+	}
+	return ModePollNoteShortRead(hsg0,numSectors);
+}
+
+void TownsCDROM::CacheOnStopDeadlineReached(void)
+{
+	state.CDDACacheStopAfterHostSamples=0;
+	if(true==state.CDDACacheAwaitModeAfterPause)
+	{
+		// Standalone PAUSE: MODE never arrived — drop host cache; guest stays PAUSED.
+		state.CDDACacheAwaitModeAfterPause=false;
+		state.CDDAStateBeforeDataRead=CDDA_IDLE;
+		ModePollClear();
+		std::ostringstream oss;
+		oss << "[CACHE] PAUSE alone (no MODE) discard wave"
+		    << " ptr=" << state.CDDAPlayPointer << "/" << state.CDDAWave.size();
+		LogMonitorLine(oss.str());
+		DiscardCDDAWaveCache();
+		return;
+	}
+	// Fixed-LBA poll or guest still PLAYING: do not mute host.
+	if(true==state.CDDAFixedLbaPolling ||
+	   CDDA_PLAYING==state.CDDAState ||
+	   CDDA_PAUSED==state.CDDAState)
+	{
+		return;
+	}
+	state.CDDAStateBeforeDataRead=CDDA_IDLE;
+	if(true==state.CDDAAudioOutput)
+	{
+		state.CDDAAudioOutput=false;
+		state.CDDACacheHostStoppedByGrace=true;
+		std::ostringstream oss;
+		oss << "[CACHE] stop host mix after grace (keep position)"
+		    << " ptr=" << state.CDDAPlayPointer << "/" << state.CDDAWave.size();
+		LogMonitorLine(oss.str());
+	}
+}
+
+void TownsCDROM::CacheOnDataReadStarted(unsigned int numSectors)
+{
+	const unsigned guestBefore=state.CDDAState;
+	const unsigned hsg0=state.readingSectorHSG;
+	const unsigned hsg1=state.endSectorHSG;
+
+	// Prefetch owning the disc: cancel so MODE can read; host wave may still be kept.
+	if(AsyncWaveReader::STATE_BUSY==waveReader.GetState())
+	{
+		waveReader.RequestCancel();
+		std::ostringstream oss;
+		oss << "[CDROM] cancel in-flight CDDA prefetch for MODE read sectors=" << numSectors;
+		LogMonitorLine(oss.str());
+	}
+
+	const bool keepHost=ModePollShouldKeepHostMix(hsg0,hsg1,numSectors,guestBefore);
+
+	// Guest CDC (no-cache): MODE stops PLAYING. PAUSED stays PAUSED (frozen SubQ).
+	if(CDDA_PLAYING==guestBefore)
+	{
+		GuestStopToIdle();
+	}
+
+	if(true==keepHost)
+	{
+		if(true!=state.CDDAWave.empty() && true!=CacheWaveRemaining() && true==state.CDDARepeat)
+		{
+			state.CDDAPlayPointer=0;
+		}
+		state.CDDAAudioOutput=true;
+		state.CDDACacheBridgingDataRead=false;
+		state.CDDACacheAwaitModeAfterPause=false;
+		state.CDDACacheHostStoppedByGrace=false;
+		CacheClearStopDeadline();
+		if(CDDA_PLAYING==guestBefore || CDDA_PAUSED==guestBefore)
+		{
+			state.CDDAStateBeforeDataRead=guestBefore;
+		}
+		{
+			std::ostringstream oss;
+			oss << "[CACHE] MODE keep host mix"
+			    << " guest=" << state.CDDAState
+			    << " sectors=" << numSectors
+			    << " hsg=" << hsg0 << ".." << hsg1
+			    << " before=" << guestBefore
+			    << " ptr=" << state.CDDAPlayPointer << "/" << state.CDDAWave.size();
+			LogMonitorLine(oss.str());
+		}
+		return;
+	}
+
+	if(true!=var.cddaCacheDuringDataRead)
+	{
+		ModePollClear();
+		state.CDDAAudioOutput=false;
+		state.CDDACacheBridgingDataRead=false;
+		CacheClearStopDeadline();
+		state.CDDACacheHostStoppedByGrace=false;
+		state.CDDAWave.clear();
+		state.CDDAPlayPointer=0;
+		{
+			std::ostringstream oss;
+			oss << "[CDROM] MODE stop host (cache OFF) sectors=" << numSectors
+			    << " hsg=" << hsg0 << ".." << hsg1
+			    << " guest=" << state.CDDAState;
+			LogMonitorLine(oss.str());
+		}
+		return;
+	}
+
+	// Host layer ON, non-poll MODE: optional bridge; guest already CDC-stopped if was PLAYING.
+	ModePollClear();
+
+	if(true!=state.CDDAWave.empty() && true!=CacheWaveRemaining() && true==state.CDDARepeat)
+	{
+		state.CDDAPlayPointer=0;
+		std::ostringstream oss;
+		oss << "[CACHE] repeat-wrap exhausted wave for MODE bridge size=" << state.CDDAWave.size();
+		LogMonitorLine(oss.str());
+	}
+
+	if(true==CacheWaveRemaining())
+	{
+		if(true==state.CDDACacheHostStoppedByGrace)
+		{
+			state.CDDAAudioOutput=false;
+			state.CDDACacheBridgingDataRead=false;
+			std::ostringstream oss;
+			oss << "[CACHE] skip MODE bridge (stopped by grace)"
+			    << " before=" << guestBefore
+			    << " ptr=" << state.CDDAPlayPointer << "/" << state.CDDAWave.size();
+			LogMonitorLine(oss.str());
+		}
+		else if(true==state.CDDAAudioOutput ||
+		        true==state.CDDACacheAwaitModeAfterPause ||
+		        CDDA_PLAYING==guestBefore ||
+		        CDDA_PAUSED==guestBefore ||
+		        CDDA_IDLE!=state.CDDAStateBeforeDataRead)
+		{
+			state.CDDACacheAwaitModeAfterPause=false;
+			state.CDDACacheHostStoppedByGrace=false;
+			CacheClearStopDeadline();
+			state.CDDAAudioOutput=true;
+			state.CDDACacheBridgingDataRead=true;
+			std::ostringstream oss;
+			oss << "[CACHE] bridge MODE read sectors=" << numSectors
+			    << " hsg=" << hsg0 << ".." << hsg1
+			    << " ptr=" << state.CDDAPlayPointer << "/" << state.CDDAWave.size()
+			    << " before=" << guestBefore;
+			LogMonitorLine(oss.str());
+		}
+		else
+		{
+			CacheClearStopDeadline();
+			state.CDDAAudioOutput=true;
+			state.CDDACacheBridgingDataRead=true;
+			std::ostringstream oss;
+			oss << "[CACHE] bridge MODE read sectors=" << numSectors
+			    << " hsg=" << hsg0 << ".." << hsg1
+			    << " ptr=" << state.CDDAPlayPointer << "/" << state.CDDAWave.size()
+			    << " (host-only)";
+			LogMonitorLine(oss.str());
+		}
+	}
+	else
+	{
+		state.CDDAAudioOutput=false;
+		state.CDDACacheBridgingDataRead=false;
+	}
+}
+
+void TownsCDROM::CacheOnDataReadFinished(void)
+{
+	const bool wasBridging=state.CDDACacheBridgingDataRead;
+	state.CDDACacheBridgingDataRead=false;
+	const unsigned int before=state.CDDAStateBeforeDataRead;
+
+	// Fixed-LBA poll: guest PLAYING or PAUSED; keep host mix, no grace mute.
+	if(true==state.CDDAFixedLbaPolling &&
+	   (CDDA_PLAYING==state.CDDAState || CDDA_PAUSED==state.CDDAState))
+	{
+		state.CDDAAudioOutput=true!=state.CDDAWave.empty();
+		state.CDDACacheHostStoppedByGrace=false;
+		state.CDDACacheAwaitModeAfterPause=false;
+		CacheClearStopDeadline();
+		return;
+	}
+
+	if(true!=var.cddaCacheDuringDataRead)
+	{
+		return;
+	}
+
+	if(true!=wasBridging || true!=CacheHostMixAfterDataRead())
+	{
+		if(true!=state.CDDAAudioOutput)
+		{
+			CacheClearStopDeadline();
+		}
+		return;
+	}
+
+	state.CDDACacheHostStoppedByGrace=false;
+	state.CDDACacheAwaitModeAfterPause=false;
+	CacheArmStopIfNoPlay();
+	{
+		std::ostringstream oss;
+		oss << "[CACHE] host mix after MODE arm grace sec="
+		    << (0<var.cddaCachePostReadGraceSec ? var.cddaCachePostReadGraceSec : 1u)
+		    << " before=" << before
+		    << " cdda=" << state.CDDAState
+		    << " ptr=" << state.CDDAPlayPointer << "/" << state.CDDAWave.size();
+		LogMonitorLine(oss.str());
+	}
+}
+
+void TownsCDROM::RebuildAudioTrackTable(void)
+{
+	audioTrackTable.clear();
+	const auto &tracks=state.GetDisc().GetTracks();
+	for(size_t i=0; i<tracks.size(); ++i)
+	{
+		if(DiscImage::TRACK_AUDIO!=tracks[i].trackType)
+		{
+			continue;
+		}
+		AudioTrackSpan span;
+		span.track=(unsigned int)(i+1);
+		// INDEX01 start; include PREGAP so play-from-pregap still maps to this track.
+		const unsigned index1=tracks[i].start.ToHSG();
+		const unsigned pre=tracks[i].preGap.ToHSG();
+		span.startHSG=(pre<index1) ? (index1-pre) : index1;
+		span.endHSG=tracks[i].end.ToHSG();
+		if(span.endHSG<span.startHSG)
+		{
+			continue;
+		}
+		audioTrackTable.push_back(span);
+	}
+	{
+		std::ostringstream oss;
+		oss << "[CACHE] audio TOC tracks=" << audioTrackTable.size();
+		for(const auto &s : audioTrackTable)
+		{
+			oss << " T" << s.track << "=" << s.startHSG << ".." << s.endHSG;
+		}
+		LogMonitorLine(oss.str());
+	}
+}
+
+unsigned int TownsCDROM::CacheAudioTrackFromHSG(unsigned int hsg) const
+{
+	// Prefer mount-time audio TOC (RebuildAudioTrackTable).
+	for(const auto &s : audioTrackTable)
+	{
+		if(hsg>=s.startHSG && hsg<=s.endHSG)
+		{
+			return s.track;
+		}
+	}
+	// Fallback: live disc TOC (table miss / pregap edge / non-AUDIO-tagged spans).
+	DiscImage::MinSecFrm msf;
+	msf.FromHSG(hsg);
+	const int t=state.GetDisc().GetTrackFromMSF(msf);
+	return (0<t) ? static_cast<unsigned int>(t) : 0;
+}
+
+unsigned int TownsCDROM::CacheAudioTrackFromMSF(DiscImage::MinSecFrm msf) const
+{
+	return CacheAudioTrackFromHSG(msf.ToHSG());
+}
+
+bool TownsCDROM::HostHasModeContinueContext(void) const
+{
+	// await-MODE alone is not MODE context: BIOS often PAUSE→PLAY without MODE.
+	if(true==state.CDDACacheAwaitModeAfterPause)
+	{
+		return false;
+	}
+	return true==state.CDDACacheBridgingDataRead ||
+	       true==state.CDDACacheHostStoppedByGrace ||
+	       true==state.CDDAFixedLbaPolling ||
+	       0!=state.CDDACacheStopAfterHostSamples ||
+	       CDDA_IDLE!=state.CDDAStateBeforeDataRead;
+}
+
+bool TownsCDROM::HostCanContinuePlay(DiscImage::MinSecFrm msfBegin,DiscImage::MinSecFrm msfEnd) const
+{
+	(void)msfEnd;
+	if(true!=var.cddaCacheDuringDataRead || true==state.CDDAWave.empty())
+	{
+		return false;
+	}
+	// Repeat-OFF natural end drains the wave: play is finished. Next PLAY must
+	// discard+install — do not PLAY continue / rewind the exhausted buffer.
+	if(true!=CacheWaveRemaining())
+	{
+		return false;
+	}
+
+	const unsigned beginHSG=msfBegin.ToHSG();
+	const unsigned baseHSG=state.CDDAWaveBaseTime.ToHSG();
+	// Always classify via mount-time audio TOC list (not CDDAWaveBaseTrack alone).
+	const unsigned newTrk=CacheAudioTrackFromHSG(beginHSG);
+	const unsigned oldTrk=CacheAudioTrackFromHSG(baseHSG);
+	if(0==newTrk || 0==oldTrk || newTrk!=oldTrk)
+	{
+		return false;
+	}
+
+	const unsigned waveBytes=(state.CDDAWave.size()+3u)&~3u;
+	const unsigned sectors=waveBytes/DiscImage::AUDIO_SECTOR_SIZE;
+	if(0==sectors)
+	{
+		return false;
+	}
+	constexpr unsigned edgeSlopHSG=8u;
+	if(beginHSG+edgeSlopHSG<baseHSG)
+	{
+		return false;
+	}
+	if(beginHSG>=baseHSG+sectors)
+	{
+		return false;
+	}
+
+	const unsigned playHSG=baseHSG+(state.CDDAPlayPointer/DiscImage::AUDIO_SECTOR_SIZE);
+	const unsigned absHSG=(playHSG<baseHSG+sectors) ? playHSG : (baseHSG+sectors-1u);
+	auto AbsDiff=[](unsigned a,unsigned b)->unsigned
+	{
+		return (a>b) ? (a-b) : (b-a);
+	};
+
+	constexpr unsigned nearHSG=150u;
+
+	if(true!=HostHasModeContinueContext())
+	{
+		// No-MODE only: asymmetric begin vs guest SubQ (estimate of *current*
+		// position). Large seek-back is restart — do not mid-continue.
+		const long long t=(nullptr!=townsPtr) ? townsPtr->state.townsTime : 0;
+		const unsigned guestSubQ=GuestAbsHSG(t);
+		const unsigned subQTrk=CacheAudioTrackFromHSG(guestSubQ);
+		if(0==subQTrk || subQTrk!=newTrk)
+		{
+			return false;
+		}
+		constexpr unsigned nearAheadHSG=600u;  // ~8s load progressive
+		constexpr unsigned nearBehindHSG=150u; // ~2s lag only
+		if(beginHSG>=guestSubQ)
+		{
+			return (beginHSG-guestSubQ)<=nearAheadHSG;
+		}
+		return (guestSubQ-beginHSG)<=nearBehindHSG;
+	}
+
+	if(AbsDiff(beginHSG,absHSG)<=nearHSG)
+	{
+		return true;
+	}
+	if(true==state.CDDAPauseDiscValid &&
+	   AbsDiff(beginHSG,state.CDDAPauseDiscHSG)<=nearHSG)
+	{
+		return true;
+	}
+	if(true==state.CDDAPauseDiscValid &&
+	   beginHSG<=absHSG+nearHSG &&
+	   beginHSG+nearHSG>=state.CDDAPauseDiscHSG)
+	{
+		return true;
+	}
+	// After MODE poll: re-PLAY to an earlier in-span MSF; keep host ptr.
+	if(beginHSG<=absHSG+nearHSG)
+	{
+		return true;
+	}
+	if(AbsDiff(beginHSG,baseHSG)<=nearHSG)
+	{
+		return true;
+	}
+	return false;
+}
+
+void TownsCDROM::PushGetStateStatus(void)
+{
+	// Natural end (and post-STOP ENDED): expose CDC Done on this A0, then IDLE.
+	// Order matches BIOS expectation: 00 00 00 00, then 07 00 00 00.
+	const bool playEnded=(CDDA_ENDED==state.CDDAState);
+	const long long now=(nullptr!=townsPtr) ? townsPtr->state.townsTime : 0;
+	unsigned doneAbsHSG=GuestAbsHSG(now);
+	unsigned doneEndHSG=state.CDDAEndTime.ToHSG();
+	const unsigned doneTrk=CacheAudioTrackFromHSG(doneAbsHSG);
+	if(0!=doneEndHSG && doneAbsHSG>doneEndHSG)
+	{
+		doneAbsHSG=doneEndHSG;
+	}
+	if(true==playEnded)
+	{
+		state.CDDAState=CDDA_IDLE;
+	}
+
+	SetStatusDriveNotReadyOrDiscChangedOrNoError();
+
+	if(true==StatusQueueHasMediaChangedOnly())
+	{
+		state.PushStatusQueue(0,0,0,0);
+	}
+
+	if(true==playEnded)
+	{
+		PushStatusCDDAPlayEnded();
+		// Done: ah must be 0 (IDLE), out 0, ptr at end (last sample) — not rewound.
+		// Status queue: 00 00 00 00 then 07 00 00 00.
+		std::ostringstream oss;
+		oss << "[CDDA] GETSTATE Done 07"
+		    << " ah=" << (unsigned)StatusSecondByte()
+		    << " cdda=" << state.CDDAState
+		    << " absHSG=" << doneAbsHSG
+		    << " endHSG=" << doneEndHSG
+		    << " trk=" << doneTrk
+		    << " " << FormatStatusQueueTail(2);
+		LogMonitorLine(oss.str());
+	}
+
+	{
+		static unsigned lastAh=0xffffffff;
+		static unsigned lastCdda=0xffffffff;
+		const unsigned ah=StatusSecondByte();
+		const unsigned cdda=state.CDDAState;
+		if(true!=playEnded && (ah!=lastAh || cdda!=lastCdda))
+		{
+			lastAh=ah;
+			lastCdda=cdda;
+			const long long t=(nullptr!=townsPtr) ? townsPtr->state.townsTime : 0;
+			const unsigned absHSG=GuestAbsHSG(t);
+			std::ostringstream oss;
+			oss << "[CDDA] GETSTATE ah=" << ah
+			    << " cdda=" << cdda
+			    << " absHSG=" << absHSG
+			    << " trk=" << CacheAudioTrackFromHSG(absHSG);
+			LogMonitorLine(oss.str());
+		}
+		else if(true==playEnded)
+		{
+			lastAh=StatusSecondByte();
+			lastCdda=state.CDDAState;
+		}
+	}
+}
+
+bool TownsCDROM::TryHandleGetStateWithoutStealingSchedule(unsigned char newCmdByte,unsigned char keepCmd)
+{
+	if(CDCMD_SETSTATE!=(newCmdByte&0x9F))
+	{
+		return false;
+	}
+
+	const bool playWait=
+	    true==state.delayedSIRQ &&
+	    CDCMD_CDDAPLAY==(keepCmd&0x9F);
+	if(true!=state.dataTransferActive && true!=playWait)
+	{
+		return false;
+	}
+
+	state.cmd=newCmdByte;
+	BreakOnCommandCheck("Write");
+	if(true==StatusRequestBit(state.cmd))
+	{
+		PushGetStateStatus();
+		if(0!=(CMDFLAG_IRQ&state.cmd))
+		{
+			SetSIRQ_IRR();
+		}
+	}
+	LogCmdEvent("Write",std::string("GETSTATE inline ")+FormatStatusQueueTail()+" (xfer/play-wait kept)");
+	state.cmd=keepCmd;
+	state.cmdReceived=false;
+	state.nParamQueue=0;
+	return true;
+}
+
+void TownsCDROM::LogMonitorLine(const std::string &line)
+{
+	if(true!=var.debugMonitorCommandWrite)
+	{
+		return;
+	}
+	std::lock_guard <std::mutex> lock(monitorMutex);
+	monitorLines.push_back(line);
+	while(2000<monitorLines.size())
+	{
+		monitorLines.pop_front();
+	}
+}
+
+std::string TownsCDROM::FormatStatusQueueTail(unsigned maxPairs) const
+{
+	if(0==maxPairs || state.statusQueue.size()<4)
+	{
+		return "status=(none)";
+	}
+	std::ostringstream oss;
+	oss << "status=";
+	const unsigned pairs=(unsigned)(state.statusQueue.size()/4);
+	const unsigned n=(pairs<maxPairs) ? pairs : maxPairs;
+	const size_t start=(pairs-n)*4;
+	for(unsigned p=0; p<n; ++p)
+	{
+		if(0!=p)
+		{
+			oss << ',';
+		}
+		const size_t i=start+p*4;
+		oss << cpputil::Ubtox(state.statusQueue[i])
+		    << cpputil::Ubtox(state.statusQueue[i+1])
+		    << cpputil::Ubtox(state.statusQueue[i+2])
+		    << cpputil::Ubtox(state.statusQueue[i+3]);
+	}
+	return oss.str();
+}
+
+void TownsCDROM::LogCmdEvent(const char phase[],const std::string &disposition)
+{
+	if(true!=var.debugMonitorCommandWrite)
+	{
+		return;
+	}
+	std::ostringstream oss;
+	oss << "[CDROM] " << phase << " cmd=" << cpputil::Ubtox(state.cmd) << " |";
+	for(int i=0; i<8; ++i)
+	{
+		oss << cpputil::Ubtox(state.paramQueue[i]);
+		if(i+1<8)
+		{
+			oss << ' ';
+		}
+	}
+	oss << " cdda=" << state.CDDAState
+	    << " ah=" << (unsigned)StatusSecondByte()
+	    << " → " << disposition;
+	LogMonitorLine(oss.str());
+}
+
+std::vector <std::string> TownsCDROM::TakeMonitorLines(void)
+{
+	std::lock_guard <std::mutex> lock(monitorMutex);
+	std::vector <std::string> out(monitorLines.begin(),monitorLines.end());
+	monitorLines.clear();
+	return out;
 }
 
 
@@ -235,6 +1314,17 @@ bool TownsCDROM::StrictViolation(int rule)
 			{
 				PICPtr->SetInterruptRequestBit(TOWNSIRQ_CDROM,false);
 			}
+			// Timing-independent Fractal fix: premature SMIC must not drop an unread
+			// command-completion IRQ. Re-assert while status bytes remain.
+			if(true==state.completionSIRQSticky && 0<state.statusQueue.size())
+			{
+				state.smicWhileCompletionSticky=true;
+				RaiseSIRQFlag();
+				if(true==state.enableSIRQ)
+				{
+					PICPtr->SetInterruptRequestBit(TOWNSIRQ_CDROM,true);
+				}
+			}
 		}
 		if(0!=(data&0x40)) // DEIC: Clera DMA-End IRQ
 		{
@@ -276,10 +1366,28 @@ bool TownsCDROM::StrictViolation(int rule)
 			// BIOS sends it immediately before every sector read.
 			var.sawSetupCommand=true;
 		}
+		{
+			const unsigned char keepCmd=
+			    (true==state.dataTransferActive) ? state.dataTransferCmd :
+			    (true==state.delayedSIRQ) ? state.delayedCmd : state.cmd;
+			if(true==TryHandleGetStateWithoutStealingSchedule(static_cast<unsigned char>(data),keepCmd))
+			{
+				break;
+			}
+		}
+
+		// Finish a pending delayed command before accepting a new one (avoids GETSTATE
+		// overwriting state.cmd and dropping CDDAPLAY that was about to complete).
+		if(true==state.delayedSIRQ)
+		{
+			DelayedCommandExecution(townsPtr->state.townsTime);
+		}
+
 		state.cmdReceived=true;
 		state.cmd=data;
 		var.lastCmdIssuedAt.SEG=townsPtr->CPU().state.CS().value;
 		var.lastCmdIssuedAt.OFFSET=townsPtr->CPU().state.EIP;
+		var.lastCmdAX=townsPtr->CPU().GetAX();
 		cmdOrParam=true;
 		break;
 	case TOWNSIO_CDROM_PARAMETER_DATA://    0x4C4, // [2] pp.224
@@ -379,6 +1487,22 @@ bool TownsCDROM::StrictViolation(int rule)
 			if(0==(state.statusQueue.size()&3) && CMDFLAG_IRQ&state.cmd)
 			{
 				SetSIRQ_IRR();
+			}
+			// Guest consumed the last completion status after SMIC: drop sticky SIRQ
+			// so a normal IRQ handler does not re-enter with a phantom interrupt.
+			if(0==state.statusQueue.size() && true==state.completionSIRQSticky)
+			{
+				const bool clearAfterSmic=state.smicWhileCompletionSticky;
+				state.completionSIRQSticky=false;
+				state.smicWhileCompletionSticky=false;
+				if(true==clearAfterSmic)
+				{
+					state.SIRQ=false;
+					if(true!=state.DEI)
+					{
+						PICPtr->SetInterruptRequestBit(TOWNSIRQ_CDROM,false);
+					}
+				}
 			}
 
 			return data;
@@ -610,38 +1734,66 @@ std::vector <std::string> TownsCDROM::GetStatusText(void) const
 
 unsigned int TownsCDROM::LoadDiscImage(const std::string &fName)
 {
-	while(AsyncWaveReader::STATE_BUSY==waveReader.GetState());
+	DiscardCDDAWaveCache();
 
 	std::string ext=cpputil::GetExtension(fName.c_str());
 	cpputil::Capitalize(ext);
+	unsigned int err=DiscImage::ERROR_NOERROR+1; // force open unless BIN/IMG cue succeeds
 	if(".BIN"==ext || ".IMG"==ext)
 	{
 		std::string cueFName=cpputil::RemoveExtension(fName.c_str());
 		cueFName+=".CUE";
-		if(DiscImage::ERROR_NOERROR==state.GetDisc().Open(cpputil::FindFileWithSearchPaths(cueFName,searchPaths)))
+		err=state.GetDisc().Open(cpputil::FindFileWithSearchPaths(cueFName,searchPaths));
+		if(DiscImage::ERROR_NOERROR!=err)
 		{
-			state.discChanged=true;
-			return true;
+			cueFName=cpputil::RemoveExtension(fName.c_str());
+			cueFName+=".cue";
+			err=state.GetDisc().Open(cpputil::FindFileWithSearchPaths(cueFName,searchPaths));
 		}
-		cueFName=cpputil::RemoveExtension(fName.c_str());
-		cueFName+=".cue";
-		if(DiscImage::ERROR_NOERROR==state.GetDisc().Open(cpputil::FindFileWithSearchPaths(cueFName,searchPaths)))
+		if(DiscImage::ERROR_NOERROR==err)
 		{
 			state.discChanged=true;
-			return true;
 		}
 	}
 
-	state.discChanged=true;
-	state.lidClosed=true;
-	state.lidLocked=false;
-	return state.GetDisc().Open(cpputil::FindFileWithSearchPaths(fName,searchPaths));
+	if(DiscImage::ERROR_NOERROR!=err)
+	{
+		state.discChanged=true;
+		state.lidClosed=true;
+		state.lidLocked=false;
+		err=state.GetDisc().Open(cpputil::FindFileWithSearchPaths(fName,searchPaths));
+	}
+
+	// ERROR_NOERROR is 0 — must not use "0!=err" as success.
+	if(DiscImage::ERROR_NOERROR==err)
+	{
+		// Warm identity cache before the guest can CDDA-prefetch / MODE-read, so UI
+		// paths (mouseCoordWriteScanState) do not scan ISO sectors under play.
+		(void)state.GetDisc().ComputeIdentity();
+		RebuildAudioTrackTable();
+		if(nullptr!=townsPtr)
+		{
+			const std::string &loaded=state.GetDisc().fName;
+			townsPtr->mouseCoordWriteScan.TryLoadForDisc(true!=loaded.empty() ? loaded : fName);
+		}
+	}
+	else
+	{
+		audioTrackTable.clear();
+	}
+	return err;
 }
 
 void TownsCDROM::Eject(void)
 {
+	DiscardCDDAWaveCache();
+	audioTrackTable.clear();
 	state.GetDisc().CleanUp();
 	state.lidClosed=false;
+	if(nullptr!=townsPtr)
+	{
+		townsPtr->mouseCoordWriteScan.ClearActiveProfile();
+	}
 }
 
 void TownsCDROM::OpenLid(void)
@@ -650,6 +1802,7 @@ void TownsCDROM::OpenLid(void)
 	{
 		StopCDDA();
 	}
+	DiscardCDDAWaveCache();
 	state.lidClosed=false;
 }
 void TownsCDROM::CloseLid(void)
@@ -659,7 +1812,7 @@ void TownsCDROM::CloseLid(void)
 
 void TownsCDROM::BreakOnCommandCheck(const char phase[])
 {
-	if(true==var.debugBreakOnCommandWrite || true==var.debugMonitorCommandWrite)
+	if(true==var.debugBreakOnCommandWrite)
 	{
 		bool commandTypeCheck=true;
 		if(0xFFFF!=var.debugBreakOnSpecificCommand && (state.cmd&0x9F)!=(var.debugBreakOnSpecificCommand&0x9F))
@@ -670,16 +1823,7 @@ void TownsCDROM::BreakOnCommandCheck(const char phase[])
 		{
 			std::string msg="CDROM Command ";
 			msg+=phase;
-			if(true==var.debugBreakOnCommandWrite)
-			{
-				townsPtr->debugger.ExternalBreak(msg);
-			}
-			std::cout << "CDROM Command " << cpputil::Ubtox(state.cmd) << " |";
-			for(int i=0; i<8; ++i)
-			{
-				std::cout << cpputil::Ubtox(state.paramQueue[i]) << " ";
-			}
-			std::cout << std::endl;
+			townsPtr->debugger.ExternalBreak(msg);
 		}
 	}
 }
@@ -687,14 +1831,47 @@ void TownsCDROM::BreakOnCommandCheck(const char phase[])
 void TownsCDROM::ExecuteCDROMCommand(void)
 {
 	BreakOnCommandCheck("Write");
-	switch(state.cmd&0x9F)
+
+	// Latch command + params for delayed execution, then free the live queue so the
+	// guest can assemble the next command (MODE etc.) without corrupting this one.
+	state.delayedCmd=state.cmd;
+	for(int i=0; i<8; ++i)
+	{
+		state.delayedParam[i]=state.paramQueue[i];
+	}
+	state.nParamQueue=0;
+	state.cmdReceived=false;
+
+	std::string disposition="latch delayed";
+	switch(state.delayedCmd&0x9F)
 	{
 	case CDCMD_CDDAPLAY://   0x04,
 		PrepareCDDAPlay();
+		disposition="latch+PrepareCDDAPlay";
 		break;
+	}
+	// Monitor with latched params (live queue was cleared above).
+	{
+		unsigned char saveParam[8];
+		for(int i=0; i<8; ++i)
+		{
+			saveParam[i]=state.paramQueue[i];
+			state.paramQueue[i]=state.delayedParam[i];
+		}
+		const unsigned char saveCmd=state.cmd;
+		state.cmd=state.delayedCmd;
+		LogCmdEvent("Write",disposition);
+		state.cmd=saveCmd;
+		for(int i=0; i<8; ++i)
+		{
+			state.paramQueue[i]=saveParam[i];
+		}
 	}
 	state.DRY=false;
 	state.delayedSIRQ=true;
+	state.completionSIRQSticky=false;
+	state.smicWhileCompletionSticky=false;
+	townsPtr->UnscheduleDeviceCallBack(*this);
 	townsPtr->ScheduleDeviceCallBack(*this,townsPtr->state.townsTime+DELAYED_STATUS_IRQ_TIME);
 }
 
@@ -703,30 +1880,122 @@ void TownsCDROM::PrepareCDDAPlay(void)
 	DiscImage::MinSecFrm msfBegin,msfEnd;
 	auto offset=DiscImage::MakeMSF(0,2,0);
 
-	msfBegin.min=DiscImage::BCDToBin(state.paramQueue[0]);
-	msfBegin.sec=DiscImage::BCDToBin(state.paramQueue[1]);
-	msfBegin.frm=DiscImage::BCDToBin(state.paramQueue[2]);
+	// Latched PLAY params from ExecuteCDROMCommand (stable while guest writes next cmd).
+	const unsigned char *p=state.delayedParam;
+
+	msfBegin.min=DiscImage::BCDToBin(p[0]);
+	msfBegin.sec=DiscImage::BCDToBin(p[1]);
+	msfBegin.frm=DiscImage::BCDToBin(p[2]);
 	msfBegin-=offset;
 
-	msfEnd.min=DiscImage::BCDToBin(state.paramQueue[3]);
-	msfEnd.sec=DiscImage::BCDToBin(state.paramQueue[4]);
-	msfEnd.frm=DiscImage::BCDToBin(state.paramQueue[5]);
+	msfEnd.min=DiscImage::BCDToBin(p[3]);
+	msfEnd.sec=DiscImage::BCDToBin(p[4]);
+	msfEnd.frm=DiscImage::BCDToBin(p[5]);
 	msfEnd-=offset;
 
+	// BIOS sometimes issues PLAY with 00:00:00..00:00:00 after a data read.
+	// Do not call GetTrackFromMSF / GetWave on that underflowed range (can hang).
+	const bool invalidPlayRange=(true!=(msfBegin<msfEnd));
+	if(true==invalidPlayRange)
+	{
+		if(true==var.cddaCacheDuringDataRead && true!=state.CDDAWave.empty())
+		{
+			std::ostringstream oss;
+			oss << "[CACHE] PrepareCDDAPlay skip invalidMSF (keep wave)"
+			    << " int93AX=" << cpputil::Ustox(var.lastInt93AX)
+			    << " int93From=" << var.lastInt93From.Format()
+			    << " cmdAt=" << var.lastCmdIssuedAt.Format()
+			    << " cmdAX=" << cpputil::Ustox(var.lastCmdAX);
+			LogMonitorLine(oss.str());
+			return;
+		}
+		return;
+	}
+
+	const long long townsTime=(nullptr!=townsPtr) ? townsPtr->state.townsTime : 0;
+	// Decide host continue before GuestStartPlay clears pauseValid / playhead.
+	const bool hostContinue=HostCanContinuePlay(msfBegin,msfEnd);
+	const unsigned logPauseValid=state.CDDAPauseDiscValid ? 1u : 0u;
+	const unsigned logPauseHSG=state.CDDAPauseDiscHSG;
+	const unsigned logAwait=state.CDDACacheAwaitModeAfterPause ? 1u : 0u;
+	const unsigned logPoll=state.CDDAFixedLbaPolling ? 1u : 0u;
+	// param6=00 mid-continue must not clear an earlier repeat=1 (Prepare runs before Exec).
+	const bool paramRepeat=(1==p[6]);
+	bool guestRepeat=paramRepeat;
+	if(true==hostContinue && true!=paramRepeat && true==state.CDDARepeat)
+	{
+		guestRepeat=true;
+	}
+
+	// Guest CDC: always accept PLAY from command begin (silent playhead).
+	GuestStartPlay(msfBegin,msfEnd,guestRepeat,townsTime);
+
+	if(true==hostContinue)
+	{
+		// Host keeps existing wave/ptr; output stays as-is until Exec enables mix.
+		return;
+	}
+
+	// Host: discard + prefetch new range. Guest already PLAYING with correct SubQ.
+	if(true!=state.CDDAWave.empty())
+	{
+		if(true==var.cddaCacheDuringDataRead)
+		{
+			std::ostringstream oss;
+			const unsigned listOld=CacheAudioTrackFromHSG(state.CDDAWaveBaseTime.ToHSG());
+			const unsigned listNew=CacheAudioTrackFromHSG(msfBegin.ToHSG());
+			oss << "[CACHE] discard (host no-continue) ptr=" << state.CDDAPlayPointer
+			    << "/" << state.CDDAWave.size()
+			    << " oldBaseHSG=" << state.CDDAWaveBaseTime.ToHSG()
+			    << " listOldTrk=" << listOld
+			    << " newBeginHSG=" << msfBegin.ToHSG()
+			    << " newEndHSG=" << msfEnd.ToHSG()
+			    << " listNewTrk=" << listNew
+			    << " pauseValid=" << logPauseValid
+			    << " pauseHSG=" << logPauseHSG
+			    << " poll=" << logPoll
+			    << " awaitMODE=" << logAwait
+			    << (true!=CacheWaveRemaining() ? " exhausted" : "");
+			LogMonitorLine(oss.str());
+		}
+		state.CDDAWave.clear();
+		state.CDDAPlayPointer=0;
+		state.CDDAAudioOutput=false;
+		state.CDDAWaveBaseTrack=0;
+		CacheClearStopDeadline();
+		state.CDDACacheBridgingDataRead=false;
+		state.CDDACacheAwaitModeAfterPause=false;
+	}
+
 	waveReader.Start(&state.GetDisc(),msfBegin,msfEnd);
+	// Host silent until install; guest SubQ already advances from begin.
 }
 
 void TownsCDROM::DelayedCommandExecution(unsigned long long int townsTime)
 {
 	BreakOnCommandCheck("Exec");
 
+	// Drop the delayed-IRQ timer (may also be called early when a new command arrives).
+	townsPtr->UnscheduleDeviceCallBack(*this);
+
 	state.DRY=true; // Tentative
 	state.delayedSIRQ=false;
 
+	// Run against the latched snapshot.  Live paramQueue may already hold the next
+	// command's parameters — preserve and restore them around this execution.
+	unsigned char liveParam[8];
+	const int liveNParam=state.nParamQueue;
 	for(int i=0; i<8; ++i)
 	{
-		var.lastParam[i]=state.paramQueue[i];
+		liveParam[i]=state.paramQueue[i];
+		state.paramQueue[i]=state.delayedParam[i];
+		var.lastParam[i]=state.delayedParam[i];
 	}
+	state.cmd=state.delayedCmd;
+
+	std::string disposition="done";
+	bool logThisExec=true;
+	static unsigned playBusyWaitCount=0;
 
 	switch(state.cmd&0x9F)
 	{
@@ -743,18 +2012,31 @@ void TownsCDROM::DelayedCommandExecution(unsigned long long int townsTime)
 					if(0!=(CMDFLAG_IRQ&state.cmd))
 					{
 						PICPtr->SetInterruptRequestBit(TOWNSIRQ_CDROM,true);
-						state.SIRQ=true;
+						RaiseSIRQFlag();
 					}
 				}
 			}
+			disposition="seek scheduled";
 		}
 		break;
 	case CDCMD_MODE1READ://  0x02,
 	case CDCMD_MODE2READ://  0x01,
 	case CDCMD_RAWREAD://    0x03,
 		{
-			// CDDA needs to stop when MODE1READ is sent while playing.
-			state.CDDAState=CDDA_IDLE;
+			// Short/fixed-LBA MODE may keep host mix (ModePollShouldKeepHostMix).
+			// Guest PLAYING → IDLE on MODE; cache ON may host-bridge.  Snapshot
+			// PLAYING/PAUSED only on the first MODE of a burst.
+			if(0!=state.CDDACacheStopAfterHostSamples)
+			{
+				CacheClearStopDeadline();
+			}
+			if(true!=state.CDDACacheBridgingDataRead && true!=state.dataTransferActive)
+			{
+				if(CDDA_PLAYING==state.CDDAState || CDDA_PAUSED==state.CDDAState)
+				{
+					state.CDDAStateBeforeDataRead=state.CDDAState;
+				}
+			}
 
 			// TownsOS V2.1 L20 issues MODE1READ command without checking the status by GETSTATE.
 			// This causes an issue when redirecting Internal CD-ROM to external CD-ROM.
@@ -766,6 +2048,7 @@ void TownsCDROM::DelayedCommandExecution(unsigned long long int townsTime)
 			if(true!=DiscLoadedAndLidClosed())
 			{
 				state.PushStatusQueue(0x21,9,0,0);
+				disposition="MODE drive not ready";
 				break;
 			}
 
@@ -801,22 +2084,11 @@ void TownsCDROM::DelayedCommandExecution(unsigned long long int townsTime)
 			msfEnd.frm=DiscImage::BCDToBin(state.paramQueue[5]);
 
 			BeginReadSector(msfBegin,msfEnd);
+			disposition=state.CDDAPrefetchWaitForMode ? "MODE defer (prefetch)" : "MODE begin transfer";
 		}
 		break;
 	case CDCMD_CDDAPLAY://   0x04,
-		if(AsyncWaveReader::STATE_DATAREADY!=waveReader.GetState())
 		{
-			state.delayedSIRQ=true;
-			townsPtr->ScheduleDeviceCallBack(*this,townsPtr->state.townsTime+DELAYED_STATUS_IRQ_TIME);
-		}
-		else
-		{
-			// I realized ChaseHQ go into infinite loop unless Status Queue is cleared.
-			// I'm wondering if I should do the same for all other commands.
-			state.ClearStatusQueue();
-
-			state.DRY=true;
-
 			DiscImage::MinSecFrm msfBegin,msfEnd;
 			auto offset=DiscImage::MakeMSF(0,2,0);
 
@@ -830,26 +2102,305 @@ void TownsCDROM::DelayedCommandExecution(unsigned long long int townsTime)
 			msfEnd.frm=DiscImage::BCDToBin(state.paramQueue[5]);
 			msfEnd-=offset;
 
-			bool repeat=(1==state.paramQueue[6]); // Should I say 0!= ?
-			state.CDDAWave=waveReader.GetWave();;
-			state.CDDAPlayPointer=0;
+			// Repeat is param byte 7 == 1 only (testc/cdrom/repeat.asm CX=0FF01H).
+			// Non-zero values like 0x09 are other flags — 0!= wrongly looped BGM forever.
+			bool repeat=(1==state.paramQueue[6]);
 
-			state.CDDAState=CDDA_PLAYING;
-			state.CDDAStartTime=msfBegin;
-			state.CDDAEndTime=msfEnd;
-			state.CDDARepeat=repeat;
+			const bool invalidPlayRange=(true!=(msfBegin<msfEnd));
 
-			if(true==StatusRequestBit(state.cmd))
+			// PAUSED/IDLE + zero/invalid MSF is a common BIOS quirk after PAUSE+MODE while
+			// the host still has a mid-track wave.  Falling through to cacheContinue resumes
+			// PLAYING and keeps Start/End/Repeat (same as PLAYING+invalidMSF).
+			//
+			// If the wave is already exhausted, do NOT fake PLAYING: BIOS must retry a
+			// real PLAY (e.g. next track with param6=01).  Accepting NoError+PLAYING here
+			// previously skipped that PLAY and dropped repeat on trk8.
+			if(true==invalidPlayRange &&
+			   (CDDA_PAUSED==state.CDDAState || CDDA_IDLE==state.CDDAState) &&
+			   true!=CacheWaveRemaining())
 			{
-				SetStatusDriveNotReadyOrDiscChangedOrNoError();
-				state.SIRQ=true;
-				if(0!=(state.cmd&CMDFLAG_IRQ) && true==state.enableSIRQ)
+				state.ClearStatusQueue();
+				state.DRY=true;
+				state.CDDACacheBridgingDataRead=false;
 				{
-					PICPtr->SetInterruptRequestBit(TOWNSIRQ_CDROM,true);
+					std::ostringstream oss;
+					oss << "[CDDA] play cmd=" << cpputil::Ubtox(state.cmd) << " |";
+					for(int i=0; i<8; ++i)
+					{
+						oss << cpputil::Ubtox(state.paramQueue[i]);
+						if(i+1<8)
+						{
+							oss << ' ';
+						}
+					}
+					oss << " → invalidMSF ignored (wave done, stay cdda=" << state.CDDAState << ")"
+					    << " param6=" << cpputil::Ubtox(state.paramQueue[6])
+					    << " int93AX=" << cpputil::Ustox(var.lastInt93AX);
+					LogMonitorLine(oss.str());
+				}
+				if(true==StatusRequestBit(state.cmd))
+				{
+					SetStatusDriveNotReadyOrDiscChangedOrNoError();
+					RaiseSIRQFlag();
+					if(0!=(state.cmd&CMDFLAG_IRQ) && true==state.enableSIRQ)
+					{
+						PICPtr->SetInterruptRequestBit(TOWNSIRQ_CDROM,true);
+					}
+				}
+				disposition="PLAY invalidMSF ignored (wave done)";
+				playBusyWaitCount=0;
+				break;
+			}
+
+			// Evaluate invalid MSF before HostCanContinuePlay — underflowed MSF used to hang GetTrackFromMSF.
+			// invalidMSF with a usable wave: reuse it (BIOS quirk resume after data read).
+			const bool cacheContinue=
+			    (true==invalidPlayRange)
+			        ? (true==var.cddaCacheDuringDataRead && true!=state.CDDAWave.empty())
+			        : (true==HostCanContinuePlay(msfBegin,msfEnd));
+
+			if(true==cacheContinue)
+			{
+				// Host mid-continue; guest CDC starts from PLAY begin (or keeps range on invalidMSF).
+				state.ClearStatusQueue();
+
+				state.DRY=true;
+
+				const bool midPlayContinue=true==CacheWaveRemaining();
+				if(true!=midPlayContinue)
+				{
+					state.CDDAPlayPointer=0;
+				}
+
+				const char *repeatSrc="param";
+				bool guestRepeat=repeat;
+				DiscImage::MinSecFrm guestBegin=msfBegin;
+				DiscImage::MinSecFrm guestEnd=msfEnd;
+				if(true!=invalidPlayRange)
+				{
+					if(true==midPlayContinue && true!=repeat && true==state.CDDARepeat)
+					{
+						guestRepeat=true;
+						repeatSrc="kept";
+					}
+					else if(true==midPlayContinue && true==repeat)
+					{
+						guestRepeat=true;
+						repeatSrc="param";
+					}
+					else
+					{
+						guestRepeat=repeat;
+						repeatSrc="param";
+					}
+				}
+				else
+				{
+					guestBegin=state.CDDAStartTime;
+					guestEnd=state.CDDAEndTime;
+					guestRepeat=state.CDDARepeat;
+					repeatSrc="kept(invalidMSF)";
+				}
+				GuestStartPlay(guestBegin,guestEnd,guestRepeat,static_cast<long long>(townsTime));
+				state.CDDAAudioOutput=true;
+				CacheClearStopDeadline();
+				state.CDDACacheHostStoppedByGrace=false;
+				state.CDDACacheBridgingDataRead=false;
+				state.CDDACacheAwaitModeAfterPause=false;
+				state.CDDAStateBeforeDataRead=CDDA_IDLE;
+				ModePollClear();
+
+				{
+					const unsigned playHSG=state.CDDAWaveBaseTime.ToHSG()
+					    +(state.CDDAPlayPointer/DiscImage::AUDIO_SECTOR_SIZE);
+					std::ostringstream cmd;
+					cmd << "cmd=" << cpputil::Ubtox(state.cmd) << " |";
+					for(int i=0; i<8; ++i)
+					{
+						cmd << cpputil::Ubtox(state.paramQueue[i]);
+						if(i+1<8)
+						{
+							cmd << ' ';
+						}
+					}
+					{
+						const long long t=static_cast<long long>(townsTime);
+						std::ostringstream oss;
+						oss << "[CDDA] play " << cmd.str()
+						    << " → continue"
+						    << (midPlayContinue ? " mid" : " rewind")
+						    << (invalidPlayRange ? " invalidMSF" : "")
+						    << " repeat=" << (state.CDDARepeat ? 1 : 0)
+						    << "(" << repeatSrc << ")"
+						    << " absHSG=" << GuestAbsHSG(t);
+						LogMonitorLine(oss.str());
+					}
+					{
+						std::ostringstream oss;
+						oss << "[CACHE] PLAY continue ptr=" << state.CDDAPlayPointer
+						    << "/" << state.CDDAWave.size()
+						    << " trk=" << state.CDDAWaveBaseTrack
+						    << " beginHSG=" << msfBegin.ToHSG()
+						    << " endHSG=" << msfEnd.ToHSG()
+						    << " playHSG=" << playHSG
+						    << " baseHSG=" << state.CDDAWaveBaseTime.ToHSG();
+						if(true==invalidPlayRange)
+						{
+							auto &cpu=townsPtr->CPU();
+							oss << " cmdAt=" << var.lastCmdIssuedAt.Format()
+							    << " cmdAX=" << cpputil::Ustox(var.lastCmdAX)
+							    << " int93AX=" << cpputil::Ustox(var.lastInt93AX)
+							    << " int93From=" << var.lastInt93From.Format()
+							    << " now="
+							    << cpputil::Ustox(cpu.state.CS().value) << ":"
+							    << cpputil::Uitox(cpu.state.EIP)
+							    << " AX=" << cpputil::Ustox(cpu.GetAX());
+						}
+						LogMonitorLine(oss.str());
+					}
+				}
+
+				if(true==StatusRequestBit(state.cmd))
+				{
+					SetStatusDriveNotReadyOrDiscChangedOrNoError();
+					RaiseSIRQFlag();
+					if(0!=(state.cmd&CMDFLAG_IRQ) && true==state.enableSIRQ)
+					{
+						PICPtr->SetInterruptRequestBit(TOWNSIRQ_CDROM,true);
+					}
+				}
+
+				townsPtr->OnCDDAStart();
+				disposition=invalidPlayRange ? "PLAY continue invalidMSF" :
+				            (midPlayContinue ? "PLAY continue mid" : "PLAY continue rewind");
+				playBusyWaitCount=0;
+				break;
+			}
+
+			{
+				const unsigned int waveSt=waveReader.GetState();
+				if(AsyncWaveReader::STATE_BUSY==waveSt)
+				{
+					// Prefetch still filling: command is not complete — keep DRY=0 and
+					// do not push status.  Poll at 1ms (not 50us) to avoid Exec flood.
+					state.DRY=false;
+					state.delayedSIRQ=true;
+					townsPtr->ScheduleDeviceCallBack(*this,townsPtr->state.townsTime+CDDA_PREFETCH_POLL_TIME);
+					++playBusyWaitCount;
+					std::ostringstream oss;
+					oss << "wait prefetch BUSY #" << playBusyWaitCount
+					    << " (DRY=0, no completion status yet)";
+					disposition=oss.str();
+					// Rate-limit: first, then every 50th (~50ms).
+					logThisExec=(1u==playBusyWaitCount || 0==(playBusyWaitCount%50u));
+					break;
+				}
+				if(AsyncWaveReader::STATE_DATAREADY!=waveSt)
+				{
+					// IDLE after RequestCancel (MODE/STOP stole the drive): restart prefetch.
+					PrepareCDDAPlay();
+					const unsigned int after=waveReader.GetState();
+					if(AsyncWaveReader::STATE_BUSY!=after &&
+					   AsyncWaveReader::STATE_DATAREADY!=after)
+					{
+						// Prefetch did not start (invalid MSF etc.) — do not spin forever.
+						state.DRY=true;
+						if(true==StatusRequestBit(state.cmd))
+						{
+							SetStatusDriveNotReadyOrDiscChangedOrNoError();
+							RaiseSIRQFlag();
+							if(0!=(state.cmd&CMDFLAG_IRQ) && true==state.enableSIRQ)
+							{
+								PICPtr->SetInterruptRequestBit(TOWNSIRQ_CDROM,true);
+							}
+						}
+						disposition="PLAY prefetch failed to start";
+						break;
+					}
+					state.DRY=false;
+					state.delayedSIRQ=true;
+					townsPtr->ScheduleDeviceCallBack(*this,townsPtr->state.townsTime+CDDA_PREFETCH_POLL_TIME);
+					disposition="PLAY restart prefetch → wait (DRY=0)";
+					break;
 				}
 			}
 
-			townsPtr->OnCDDAStart();
+			{
+				// I realized ChaseHQ go into infinite loop unless Status Queue is cleared.
+				// I'm wondering if I should do the same for all other commands.
+				state.ClearStatusQueue();
+
+				state.DRY=true;
+
+				state.CDDAWave=std::move(waveReader.GetWave());
+				if(true==state.CDDAWave.empty())
+				{
+					// Cancel/restart race left an empty buffer — retry prefetch, stay silent.
+					state.CDDAAudioOutput=false;
+					state.CDDAPlayPointer=0;
+					PrepareCDDAPlay();
+					state.DRY=false;
+					state.delayedSIRQ=true;
+					townsPtr->ScheduleDeviceCallBack(*this,townsPtr->state.townsTime+CDDA_PREFETCH_POLL_TIME);
+					LogMonitorLine("[CDDA] play install empty — retry prefetch");
+					disposition="PLAY install empty → retry prefetch (DRY=0)";
+					break;
+				}
+				state.CDDAPlayPointer=0;
+				state.CDDAWaveBaseTime=msfBegin;
+				state.CDDAWaveBaseTrack=CacheAudioTrackFromMSF(msfBegin);
+				state.CDDAAudioOutput=true;
+				CacheClearStopDeadline();
+				state.CDDACacheHostStoppedByGrace=false;
+				state.CDDACacheBridgingDataRead=false;
+				state.CDDACacheAwaitModeAfterPause=false;
+				state.CDDAStateBeforeDataRead=CDDA_IDLE;
+				ModePollClear();
+
+				GuestStartPlay(msfBegin,msfEnd,repeat,static_cast<long long>(townsTime));
+
+				{
+					std::ostringstream oss;
+					oss << "[CDDA] play cmd=" << cpputil::Ubtox(state.cmd) << " |";
+					for(int i=0; i<8; ++i)
+					{
+						oss << cpputil::Ubtox(state.paramQueue[i]);
+						if(i+1<8)
+						{
+							oss << ' ';
+						}
+					}
+					oss << " → PLAYING"
+					    << " beginHSG=" << msfBegin.ToHSG()
+					    << " endHSG=" << msfEnd.ToHSG()
+					    << " repeat=" << (state.CDDARepeat ? 1 : 0)
+					    << " absHSG=" << GuestAbsHSG(static_cast<long long>(townsTime));
+					LogMonitorLine(oss.str());
+				}
+				{
+					std::ostringstream oss;
+					oss << "[CACHE] PLAY install wave=" << state.CDDAWave.size()
+					    << " baseHSG=" << state.CDDAWaveBaseTime.ToHSG()
+					    << " endHSG=" << msfEnd.ToHSG()
+					    << " trk=" << state.CDDAWaveBaseTrack
+					    << " ptr=0/" << state.CDDAWave.size();
+					LogMonitorLine(oss.str());
+				}
+
+				if(true==StatusRequestBit(state.cmd))
+				{
+					SetStatusDriveNotReadyOrDiscChangedOrNoError();
+					RaiseSIRQFlag();
+					if(0!=(state.cmd&CMDFLAG_IRQ) && true==state.enableSIRQ)
+					{
+						PICPtr->SetInterruptRequestBit(TOWNSIRQ_CDROM,true);
+					}
+				}
+
+				townsPtr->OnCDDAStart();
+				disposition="PLAY install+start";
+				playBusyWaitCount=0;
+			}
 		}
 		break;
 	case CDCMD_TOCREAD://    0x05,
@@ -860,7 +2411,8 @@ void TownsCDROM::DelayedCommandExecution(unsigned long long int townsTime)
 		{
 			if(true==SetStatusDriveNotReadyOrDiscChanged())
 			{
-				return;
+				disposition="TOC drive not ready/changed";
+				break;
 			}
 			SetStatusNoError();
 		}
@@ -869,16 +2421,23 @@ void TownsCDROM::DelayedCommandExecution(unsigned long long int townsTime)
 		{
 			SetSIRQ_IRR();
 		}
+		disposition="TOC";
 		break;
 	case CDCMD_SUBQREAD://   0x06,
 		if(true==StatusRequestBit(state.cmd))
 		{
 			SetStatusSubQRead();
+			disposition="SUBQ";
+		}
+		else
+		{
+			disposition="SUBQ (no STA req)";
 		}
 		break;
 	case CDCMD_UNKNOWN1://   0x1F, // NOP and requst status? I guess?
 		std::cout << "CDROM Command " << cpputil::Ubtox(state.cmd) << " function unknown." << std::endl;
 		std::cout << "Currently just return no-error status." << std::endl;
+		disposition="UNKNOWN1";
 		if(true==StatusRequestBit(state.cmd))
 		{
 			if(3==state.paramQueue[0])
@@ -886,7 +2445,8 @@ void TownsCDROM::DelayedCommandExecution(unsigned long long int townsTime)
 				if(true!=DiscLoadedAndLidClosed())
 				{
 					SetStatusDriveNotReady();
-					return;
+					disposition="UNKNOWN1 drive not ready";
+					break;
 				}
 				else if(true==state.discChanged)
 				{
@@ -921,7 +2481,8 @@ void TownsCDROM::DelayedCommandExecution(unsigned long long int townsTime)
 			{
 				if(true==SetStatusDriveNotReadyOrDiscChanged())
 				{
-					return;
+					disposition="UNKNOWN1 drive not ready/changed";
+					break;
 				}
 				SetStatusNoError();
 			}
@@ -952,47 +2513,25 @@ void TownsCDROM::DelayedCommandExecution(unsigned long long int townsTime)
 	case CDCMD_SETSTATE://   0x80,
 		if(true==StatusRequestBit(state.cmd))
 		{
-			townsPtr->UnscheduleDeviceCallBack(*this);
-			SetStatusDriveNotReadyOrDiscChangedOrNoError();
-
-			// 2026/06/03
-			// Linux Debian Kernel Version 2.0.33 for TOWNS (Probably earlier version, too)
-			// TOWNS CD-ROM Driver, towns_cd.c, 
-			//   assumes that the Media Changed (21 08 00 00) is not an error, (explicitly not making it an error) and
-			//   expects a clear error (such as 21 x x x) or command-accepted (0 x x x), is given after
-			//   (or can be before) the Media Changed.
-			// If the status queue only has Media Changed (21 08 00 00), it reads the status, and then wait for
-			// an error or command-accepted forever.
-			// Not certain if it is only for command 0x80.  Not certain if it is only for Media Changed.
-			if(true==StatusQueueHasMediaChangedOnly())
+			// Do not Unschedule while MODE transfer, MODE-deferred-for-prefetch, or async
+			// CDDA GetWave is in flight — that dropped CDDAPLAY/MODE1 completions.
+			if(true!=state.dataTransferActive &&
+			   true!=state.CDDAPrefetchWaitForMode &&
+			   AsyncWaveReader::STATE_BUSY!=waveReader.GetState())
 			{
-				state.PushStatusQueue(0,0,0,0);
+				townsPtr->UnscheduleDeviceCallBack(*this);
 			}
+			PushGetStateStatus();
 
-			if(CDDA_ENDED==state.CDDAState)
-			{
-				// 2020/07/30
-				// Vain Dream crashes when CD BIOS Call AX=53C0H returns an error because the BIOS is expecting
-				// status 00 00 00 00, but this PushStatusCDDAPlayEnded() pushes 07 00 00 00.
-				// The retry code jumps to 4600:0084
-				//     4600:0084 1E                        PUSH    DS
-				//     4600:0085 8CC8                      MOV     AX,CS
-				// However, it should really jump to 4600:0085.  By jumping to 4600:0084, PUSH DS moves SP
-				// by two bytes, and the subsequent RETF fails to return to the correct address.
-				//
-				// Vain Dream runs by commenting out PushStatusCDDAPlayEnded() below.  But,
-				// in the past I saw something (presumably one version of CD-ROM BIOS) was expecting
-				// 07 00 00 00 status after CDDA is done, but I cannot find it
-				//
-				// Maybe subsequent to CDDA Stop command?
-
-				// PushStatusCDDAPlayEnded();
-				state.CDDAState=CDDA_IDLE;
-			}
 			if(CMDFLAG_IRQ&state.cmd)
 			{
 				SetSIRQ_IRR();
 			}
+			disposition="GETSTATE";
+		}
+		else
+		{
+			disposition="GETSTATE (no STA req)";
 		}
 		break;
 	case CDCMD_CDDASET://    0x81,
@@ -1008,7 +2547,7 @@ void TownsCDROM::DelayedCommandExecution(unsigned long long int townsTime)
 					if(0!=(CMDFLAG_IRQ&state.cmd))
 					{
 						PICPtr->SetInterruptRequestBit(TOWNSIRQ_CDROM,true);
-						state.SIRQ=true;
+						RaiseSIRQFlag();
 					}
 					break;
 				}
@@ -1020,7 +2559,7 @@ void TownsCDROM::DelayedCommandExecution(unsigned long long int townsTime)
 					if(0!=(CMDFLAG_IRQ&state.cmd))
 					{
 						PICPtr->SetInterruptRequestBit(TOWNSIRQ_CDROM,true);
-						state.SIRQ=true;
+						RaiseSIRQFlag();
 					}
 					break;
 				}
@@ -1038,7 +2577,7 @@ void TownsCDROM::DelayedCommandExecution(unsigned long long int townsTime)
 					if(0!=(CMDFLAG_IRQ&state.cmd))
 					{
 						PICPtr->SetInterruptRequestBit(TOWNSIRQ_CDROM,true);
-						state.SIRQ=true;
+						RaiseSIRQFlag();
 					}
 					break;
 				}
@@ -1071,7 +2610,7 @@ void TownsCDROM::DelayedCommandExecution(unsigned long long int townsTime)
 					if(0!=(CMDFLAG_IRQ&state.cmd))
 					{
 						PICPtr->SetInterruptRequestBit(TOWNSIRQ_CDROM,true);
-						state.SIRQ=true;
+						RaiseSIRQFlag();
 					}
 					break;
 				}
@@ -1094,7 +2633,7 @@ void TownsCDROM::DelayedCommandExecution(unsigned long long int townsTime)
 					if(0!=(CMDFLAG_IRQ&state.cmd))
 					{
 						PICPtr->SetInterruptRequestBit(TOWNSIRQ_CDROM,true);
-						state.SIRQ=true;
+						RaiseSIRQFlag();
 					}
 					break;
 				}
@@ -1115,17 +2654,50 @@ void TownsCDROM::DelayedCommandExecution(unsigned long long int townsTime)
 		if(true==CDDAIsPlaying())
 		{
 			townsPtr->ScheduleDeviceCallBack(*this,townsPtr->state.townsTime+CDDASTOP_TIME);
+			disposition="STOP scheduled";
 		}
 		else
 		{
 			StopCDDA();  // Already stopped, but it sets up status queue.
+			disposition="STOP immediate";
 		}
 		break;
 	case CDCMD_CDDAPAUSE://  0x85,
-		// Fix for ChaseHQ.
-		// CDDAState must be reset to IDLE regardless of the Status Request.
-		// ChaseHQ was issuing CDDAPAUSE command without Status Request flag.
-		state.CDDAState=CDDA_PAUSED;
+		// Fix for ChaseHQ: PAUSE without STA still updates guest CDDAState.
+		GuestPause(static_cast<long long>(townsTime));
+		// Host: await MODE for bridge; clear poll so no-MODE PLAY does not mid-continue.
+		if(true==var.cddaCacheDuringDataRead && true==CacheWaveRemaining())
+		{
+			ModePollClear();
+			state.CDDAStateBeforeDataRead=CDDA_IDLE;
+			state.CDDAAudioOutput=true;
+			CacheArmAwaitModeAfterPause();
+		}
+		else
+		{
+			state.CDDAAudioOutput=false;
+			state.CDDACacheAwaitModeAfterPause=false;
+			CacheClearStopDeadline();
+			ModePollClear();
+			state.CDDAStateBeforeDataRead=CDDA_IDLE;
+		}
+		{
+			const long long t=static_cast<long long>(townsTime);
+			std::ostringstream oss;
+			oss << "[CDDA] PAUSE cdda=" << state.CDDAState
+			    << " absHSG=" << GuestAbsHSG(t)
+			    << " pauseHSG=" << state.CDDAPauseDiscHSG;
+			LogMonitorLine(oss.str());
+		}
+		if(true==var.cddaCacheDuringDataRead)
+		{
+			std::ostringstream oss;
+			oss << "[CACHE] PAUSE host"
+			    << " out=" << (state.CDDAAudioOutput ? 1 : 0)
+			    << " awaitMODE=" << (state.CDDACacheAwaitModeAfterPause ? 1 : 0)
+			    << " ptr=" << state.CDDAPlayPointer << "/" << state.CDDAWave.size();
+			LogMonitorLine(oss.str());
+		}
 		if(true==StatusRequestBit(state.cmd))
 		{
 			if(true!=SetStatusDriveNotReadyOrDiscChanged())
@@ -1134,14 +2706,29 @@ void TownsCDROM::DelayedCommandExecution(unsigned long long int townsTime)
 				state.PushStatusQueue(0x12,0,0,0);
 			}
 		}
+		disposition="PAUSE";
 		break;
 	case CDCMD_UNKNOWN2://   0x86,
 		std::cout << "CDROM Command " << cpputil::Ubtox(state.cmd) << " not implemented yet." << std::endl;
+		disposition="UNKNOWN2 unimplemented";
 		break;
 	case CDCMD_CDDARESUME:// 0x87,
+		// RESUME only from PAUSED (do not invent PLAYING from IDLE + host wave).
 		if(CDDA_PAUSED==state.CDDAState)
 		{
-			state.CDDAState=CDDA_PLAYING;
+			GuestResume(static_cast<long long>(townsTime));
+			state.CDDAAudioOutput=true!=state.CDDAWave.empty();
+			CacheClearStopDeadline();
+			state.CDDACacheHostStoppedByGrace=false;
+			state.CDDACacheBridgingDataRead=false;
+			state.CDDACacheAwaitModeAfterPause=false;
+			state.CDDAStateBeforeDataRead=CDDA_IDLE;
+			ModePollClear();
+			disposition="RESUME → PLAYING";
+		}
+		else
+		{
+			disposition="RESUME ignored (not PAUSED)";
 		}
 		if(true==StatusRequestBit(state.cmd))
 		{
@@ -1154,8 +2741,21 @@ void TownsCDROM::DelayedCommandExecution(unsigned long long int townsTime)
 		break;
 	}
 
+	if(true==logThisExec)
+	{
+		disposition+=" ";
+		disposition+=FormatStatusQueueTail();
+		LogCmdEvent("Exec",disposition);
+	}
+
+	// Restore live queue for a command the guest may already be assembling.
+	for(int i=0; i<8; ++i)
+	{
+		state.paramQueue[i]=liveParam[i];
+	}
+	state.nParamQueue=liveNParam;
 	state.cmdReceived=false;
-	state.nParamQueue=0;
+	// If PLAY re-armed delayedSIRQ above, keep delayedCmd/delayedParam as-is.
 }
 
 void TownsCDROM::BeginReadSector(DiscImage::MinSecFrm msfBegin,DiscImage::MinSecFrm msfEnd)
@@ -1167,11 +2767,18 @@ void TownsCDROM::BeginReadSector(DiscImage::MinSecFrm msfBegin,DiscImage::MinSec
 		SetStatusParameterError();
 		state.readingSectorHSG=0;
 		state.endSectorHSG=0;
+		state.CDDAPrefetchWaitForMode=false;
+		state.modeDeferredSeekTime=0;
 	}
 	else
 	{
 		state.readingSectorHSG-=150;
 		state.endSectorHSG-=150;
+
+		const unsigned int numSectors=state.endSectorHSG-state.readingSectorHSG+1;
+		CacheOnDataReadStarted(numSectors);
+		state.dataTransferActive=true;
+		state.dataTransferCmd=state.cmd;
 
 		uint64_t distance;
 		if(state.readingSectorHSG<state.headPositionHSG)
@@ -1189,21 +2796,44 @@ void TownsCDROM::BeginReadSector(DiscImage::MinSecFrm msfBegin,DiscImage::MinSec
 		// Shadow of the Beast issues command 02H and expects status to be returned.
 		// Probably MODE2READ command needs to disregard STATUS REQUEST bit.
 
-		// Should I immediately return No-Error status before starting transfer?
-		// BIOS is not checking it immediately.
-		// 2F Boot ROM _IS_ checking it immediately.
-		SetStatusNoError();
-		if(true==state.enableSIRQ)
-		{
-			state.SIRQ=true;
-			PICPtr->SetInterruptRequestBit(TOWNSIRQ_CDROM,true);
-		}
-		townsPtr->ScheduleDeviceCallBack(*this,townsPtr->state.townsTime+state.readSectorTime+seekTime+var.sectorReadTimeDelay);
-
 		state.DRY=false;
 		state.DTSF=false;
 		state.WaitForDTSSTS=false;
+		state.modeSectorEmptyRetries=0;
+
+		// Core of 3b9f0976: do not push No-Error while CDDA prefetch still owns the disc.
+		// Early 00 + late/empty DMA → guest retries → TMENU / "insert disc" (CUE and CHD).
+		if(AsyncWaveReader::STATE_BUSY==waveReader.GetState())
+		{
+			waveReader.RequestCancel();
+			state.CDDAPrefetchWaitForMode=true;
+			state.modeDeferredSeekTime=seekTime;
+			townsPtr->ScheduleDeviceCallBack(*this,townsPtr->state.townsTime+1000000); // 1ms
+			LogMonitorLine("[CACHE] defer MODE status until CDDA prefetch releases disc");
+			return;
+		}
+
+		StartModeSectorTransfer(seekTime);
 	}
+}
+
+void TownsCDROM::StartModeSectorTransfer(uint64_t seekTime)
+{
+	state.CDDAPrefetchWaitForMode=false;
+	state.modeDeferredSeekTime=0;
+
+	// MODE accept is always 00 00 (command OK).  Do not scrub prior GETSTATE
+	// playing/paused pairs from the status queue — guest-visible history stays intact.
+	// Short poll MODE may leave guest PLAYING; longer MODE leaves IDLE (+ optional host bridge).
+	state.PushStatusQueue(0,0,0,0);
+	if(true==state.enableSIRQ)
+	{
+		RaiseSIRQFlag();
+		PICPtr->SetInterruptRequestBit(TOWNSIRQ_CDROM,true);
+	}
+	townsPtr->ScheduleDeviceCallBack(
+	    *this,
+	    townsPtr->state.townsTime+state.readSectorTime+seekTime+var.sectorReadTimeDelay);
 }
 
 /* virtual */ void TownsCDROM::RunScheduledTask(unsigned long long int townsTime)
@@ -1211,10 +2841,18 @@ void TownsCDROM::BeginReadSector(DiscImage::MinSecFrm msfBegin,DiscImage::MinSec
 	if(true==state.delayedSIRQ)
 	{
 		DelayedCommandExecution(townsTime);
+		// Re-arm if MODE is still waiting for prefetch (callback may have been stolen).
+		if(true==state.CDDAPrefetchWaitForMode)
+		{
+			townsPtr->ScheduleDeviceCallBack(*this,townsPtr->state.townsTime+1000000);
+		}
 		return;
 	}
 
-	switch(state.cmd&0x9F)
+	const unsigned int schedCmd=
+	    (true==state.dataTransferActive) ? (state.dataTransferCmd&0x9F) : (state.cmd&0x9F);
+
+	switch(schedCmd)
 	{
 	case CDCMD_SEEK://       0x00,
 		{
@@ -1250,7 +2888,7 @@ void TownsCDROM::BeginReadSector(DiscImage::MinSecFrm msfBegin,DiscImage::MinSec
 				if(0!=(CMDFLAG_IRQ&state.cmd))
 				{
 					PICPtr->SetInterruptRequestBit(TOWNSIRQ_CDROM,true);
-					state.SIRQ=true;
+					RaiseSIRQFlag();
 				}
 			}
 		}
@@ -1260,6 +2898,19 @@ void TownsCDROM::BeginReadSector(DiscImage::MinSecFrm msfBegin,DiscImage::MinSec
 	case CDCMD_MODE2READ://  0x01,
 	case CDCMD_RAWREAD://    0x03,
 		{
+			if(true==state.CDDAPrefetchWaitForMode)
+			{
+				if(AsyncWaveReader::STATE_BUSY==waveReader.GetState())
+				{
+					townsPtr->ScheduleDeviceCallBack(*this,townsPtr->state.townsTime+1000000); // 1ms
+					return;
+				}
+				const uint64_t seekTime=state.modeDeferredSeekTime;
+				LogMonitorLine("[CACHE] MODE status+transfer after CDDA prefetch released disc");
+				StartModeSectorTransfer(seekTime);
+				return;
+			}
+
 			if(state.readingSectorHSG<=state.endSectorHSG) // Have more data.
 			{
 				auto DMACh=DMACPtr->GetDMAChannel(TOWNSDMA_CDROM);
@@ -1307,7 +2958,7 @@ void TownsCDROM::BeginReadSector(DiscImage::MinSecFrm msfBegin,DiscImage::MinSec
 					if(true==StatusRequestBit(state.cmd) && 0!=(state.cmd&CMDFLAG_IRQ) && true==state.enableSIRQ)
 					{
 						PICPtr->SetInterruptRequestBit(TOWNSIRQ_CDROM,true);
-						state.SIRQ=true;
+						RaiseSIRQFlag();
 					}
 					state.DRY=true;
 					state.DEI=false;
@@ -1323,11 +2974,16 @@ void TownsCDROM::BeginReadSector(DiscImage::MinSecFrm msfBegin,DiscImage::MinSec
 					// as a single ~500ms real-time stall (and matching SDL3 audio
 					// underrun) despite townsTime itself never falling behind -
 					// i.e. this print was the stall, not a symptom of one.
-					if(CDCMD_MODE1READ==(state.cmd&0x9F))
+					state.dataTransferActive=false;
+					state.CDDAPrefetchWaitForMode=false;
+					state.modeDeferredSeekTime=0;
+					CacheOnDataReadFinished();
+					LogMonitorLine("[CDROM] MODE lost-data timeout");
+					if(CDCMD_MODE1READ==schedCmd)
 					{
 						std::cout << "MODE1READ time out.\n";
 					}
-					else if(CDCMD_MODE2READ==(state.cmd&0x9F))
+					else if(CDCMD_MODE2READ==schedCmd)
 					{
 						std::cout << "MODE2READ time out.\n";
 					}
@@ -1360,9 +3016,17 @@ void TownsCDROM::BeginReadSector(DiscImage::MinSecFrm msfBegin,DiscImage::MinSec
 
 						// This check contradicted with Yumimi Mix.  Therefore, I made it so that it also checks
 						// true==state.DEI.  It clears Yumimi Mix.
-						townsPtr->ScheduleDeviceCallBack(*this,townsPtr->state.townsTime+STATUS_CHECKBACK_TIME);
-						return;
+						// Bound checkbacks so Compatible i386DX timing cannot leave DRY=0 forever.
+						if(state.dataReadyCheckbacks<STATUS_CHECKBACK_MAX)
+						{
+							++state.dataReadyCheckbacks;
+							townsPtr->ScheduleDeviceCallBack(*this,townsPtr->state.townsTime+STATUS_CHECKBACK_TIME);
+							return;
+						}
+						state.dataReadyCheckbacks=0;
 					}
+
+					state.dataReadyCheckbacks=0;
 
 					// Linux CD-ROM driver is expecting to receive 00 00 00 00 before 22 00 00 00.
 					// However, static int cdrom_read(u_int start, u_int end, u_char *buf) function is waiting
@@ -1386,7 +3050,7 @@ void TownsCDROM::BeginReadSector(DiscImage::MinSecFrm msfBegin,DiscImage::MinSec
 						PICPtr->SetInterruptRequestBit(TOWNSIRQ_CDROM,true);
 					}
 
-					state.SIRQ=true;
+					RaiseSIRQFlag();
 					state.DEI=false;
 					state.DTSF=false;
 
@@ -1404,11 +3068,11 @@ void TownsCDROM::BeginReadSector(DiscImage::MinSecFrm msfBegin,DiscImage::MinSec
 					state.headPositionHSG=state.readingSectorHSG;
 
 					std::vector <unsigned char> data;
-					if(CDCMD_MODE1READ==(state.cmd&0x9F))
+					if(CDCMD_MODE1READ==schedCmd)
 					{
 						data=state.GetDisc().ReadSectorMODE1(state.readingSectorHSG,1);
 					}
-					else if(CDCMD_MODE2READ==(state.cmd&0x9F))
+					else if(CDCMD_MODE2READ==schedCmd)
 					{
 						data=state.GetDisc().ReadSectorMODE2(state.readingSectorHSG,1);
 					}
@@ -1416,6 +3080,41 @@ void TownsCDROM::BeginReadSector(DiscImage::MinSecFrm msfBegin,DiscImage::MinSec
 					{
 						data=state.GetDisc().ReadSectorRAW(state.readingSectorHSG,1);
 					}
+					// Soft-retry on empty while prefetch may still touch the image.
+					// Do not push 21 0F (that path led to TMENU / "insert disc" on CUE).
+					// After retries, zero-fill one sector and continue (pre-3b9f DMA-empty).
+					if(true==data.empty())
+					{
+						if(AsyncWaveReader::STATE_BUSY==waveReader.GetState())
+						{
+							waveReader.RequestCancel();
+							state.DMATransfer=false;
+							state.DTSF=false;
+							state.WaitForDTSSTS=false;
+							townsPtr->ScheduleDeviceCallBack(*this,townsPtr->state.townsTime+1000000);
+							LogMonitorLine("[CDROM] MODE sector empty — wait for CDDA prefetch");
+							return;
+						}
+						constexpr unsigned int kEmptyRetries=8;
+						if(state.modeSectorEmptyRetries<kEmptyRetries)
+						{
+							++state.modeSectorEmptyRetries;
+							waveReader.RequestCancel();
+							state.DMATransfer=false;
+							state.DTSF=false;
+							state.WaitForDTSSTS=false;
+							townsPtr->ScheduleDeviceCallBack(*this,townsPtr->state.townsTime+1000000);
+							LogMonitorLine("[CDROM] MODE sector empty — retry");
+							return;
+						}
+						const unsigned int fillBytes=
+						    (CDCMD_MODE2READ==schedCmd) ? DiscImage::MODE2_BYTES_PER_SECTOR :
+						    (CDCMD_RAWREAD==schedCmd) ? DiscImage::RAW_BYTES_PER_SECTOR :
+						    DiscImage::MODE1_BYTES_PER_SECTOR;
+						data.assign(fillBytes,0);
+						LogMonitorLine("[CDROM] MODE sector empty after retries — zero-fill continue");
+					}
+					state.modeSectorEmptyRetries=0;
 					if(DMACh->currentCount+1<data.size())
 					{
 						data.resize(DMACh->currentCount+1);
@@ -1448,11 +3147,17 @@ void TownsCDROM::BeginReadSector(DiscImage::MinSecFrm msfBegin,DiscImage::MinSec
 
 				// See above comment about Shadow of the Beast for why not checking STATUS REQUEST bit for setting status.
 				SetStatusReadDone();
+				const unsigned char doneCmd=state.dataTransferCmd;
+				state.dataTransferActive=false;
+				state.CDDAPrefetchWaitForMode=false;
+				state.modeDeferredSeekTime=0;
+				state.modeSectorEmptyRetries=0;
+				CacheOnDataReadFinished();
 
-				if(true==StatusRequestBit(state.cmd))
+				if(true==StatusRequestBit(doneCmd))
 				{
-					state.SIRQ=true;
-					if(0!=(state.cmd&CMDFLAG_IRQ) && true==state.enableSIRQ)
+					RaiseSIRQFlag();
+					if(0!=(doneCmd&CMDFLAG_IRQ) && true==state.enableSIRQ)
 					{
 						PICPtr->SetInterruptRequestBit(TOWNSIRQ_CDROM,true);
 					}
@@ -1592,24 +3297,13 @@ void TownsCDROM::SetStatusSubQRead(void)
 	DiscImage::MinSecFrm twoSec,discTime;
 	twoSec.Set(0,2,0);
 
-	if(CDDA_PLAYING==state.CDDAState)
 	{
-		uint64_t playPtr=state.CDDAPlayPointer;
-		playPtr/=4;
-		playPtr*=SECTOR_PER_SEC_1X;
-		playPtr/=CDDA_SAMPLING_RATE;
-		playPtr+=state.CDDAStartTime.ToHSG();
-
-		discTime.FromHSG(playPtr);
-
+		const long long now=(nullptr!=townsPtr) ? townsPtr->state.townsTime : 0;
+		discTime.FromHSG(GuestAbsHSG(now));
 		if(state.CDDAEndTime<discTime)
 		{
 			discTime=state.CDDAEndTime;
 		}
-	}
-	else
-	{
-		discTime=state.CDDAEndTime;
 	}
 
 	auto trackTime=state.GetDisc().DiscTimeToTrackTime(discTime);
@@ -1675,6 +3369,8 @@ unsigned char TownsCDROM::StatusSecondByte(void) const
 		return 3;
 	}
 
+	// Host cache mix (CDDAAudioOutput) must not affect this — guest must not see cache BGM.
+
 	// Actually, 5 for immediately after CDDA Stopped.
 
 	return 0;
@@ -1702,9 +3398,10 @@ bool TownsCDROM::StatusQueueHasMediaChangedOnly(void) const
 void TownsCDROM::StopCDDA(void)
 {
 	state.ClearStatusQueue();
-	if(true!=SetStatusDriveNotReadyOrDiscChanged())
+	state.CDDAPauseDiscValid=false;
+	if(true==StatusRequestBit(state.cmd))
 	{
-		state.CDDAState=CDDA_ENDED;
+		GuestStopToEnded();
 		SetStatusNoError();
 		PushStatusCDDAStopDone();
 		state.PushStatusQueue(0,0x0D,0,0);
@@ -1712,7 +3409,46 @@ void TownsCDROM::StopCDDA(void)
 	else
 	{
 		// See fix for ChaseHQ in CDDAPAUSE.
-		state.CDDAState=CDDA_IDLE;
+		GuestStopToIdle();
+	}
+	// Guest stopped — do not let a later MODE restore stale PLAY/PAUSE context.
+	state.CDDAStateBeforeDataRead=CDDA_IDLE;
+	state.CDDACacheAwaitModeAfterPause=false;
+	ModePollClear();
+	{
+		std::ostringstream oss;
+		oss << "[CDDA] STOP cdda=" << state.CDDAState;
+		LogMonitorLine(oss.str());
+	}
+	if(true==var.cddaCacheDuringDataRead)
+	{
+		std::ostringstream oss;
+		oss << "[CACHE] STOP host"
+		    << " out=" << (state.CDDAAudioOutput ? 1 : 0)
+		    << " ptr=" << state.CDDAPlayPointer << "/" << state.CDDAWave.size();
+		LogMonitorLine(oss.str());
+	}
+	// Host: with cache, keep wave (+ mix) so a following short MODE can bridge.
+	if(true!=var.cddaCacheDuringDataRead || true!=CacheWaveRemaining())
+	{
+		state.CDDAAudioOutput=false;
+		state.CDDAWave.clear();
+		state.CDDAPlayPointer=0;
+		waveReader.RequestCancel();
+	}
+}
+
+
+void TownsCDROM::RaiseSIRQFlag(void)
+{
+	state.SIRQ=true;
+	if(0<state.statusQueue.size())
+	{
+		if(true!=state.completionSIRQSticky)
+		{
+			state.smicWhileCompletionSticky=false;
+		}
+		state.completionSIRQSticky=true;
 	}
 }
 
@@ -1720,7 +3456,7 @@ void TownsCDROM::SetSIRQ_IRR(void)
 {
 	if(0<state.statusQueue.size())
 	{
-		state.SIRQ=true;
+		RaiseSIRQFlag();
 		if(true==state.enableSIRQ)  // ChaseHQ will crash without this condition.
 		{
 			PICPtr->SetInterruptRequestBit(TOWNSIRQ_CDROM,true);
@@ -1738,7 +3474,9 @@ void TownsCDROM::SetSIRQ_IRR(void)
 	//   Bug fix.  Use PushUcharArray/ReadUcharArray for status queue.
 	// Version 7
 	//   lidClosed, lidLocked
-	return 7;
+	// Version 8
+	//   CDDAAudioOutput, CDDAWaveBaseTime (EMU CDDA cache)
+	return 8;
 }
 /* virtual */ void TownsCDROM::SpecificSerialize(std::vector <unsigned char> &data,std::string stateFName) const
 {
@@ -1758,11 +3496,13 @@ void TownsCDROM::SetSIRQ_IRR(void)
 	PushBool(data,state.enableDEI);
 
 	PushBool(data,state.cmdReceived);
-	PushUint16(data,state.cmd);
+	PushUint16(data,state.delayedSIRQ ? state.delayedCmd : state.cmd);
 	PushInt32(data,state.nParamQueue);
-	for(auto p : state.paramQueue)
+	for(int i=0; i<8; ++i)
 	{
-		PushUint16(data,p);
+		// While a delayed command is pending, live paramQueue may hold the *next*
+		// command's bytes — persist the latch so PLAY/MODE resume correctly.
+		PushUint16(data,state.delayedSIRQ ? state.delayedParam[i] : state.paramQueue[i]);
 	}
 	PushUcharArray(data,state.statusQueue);
 
@@ -1778,11 +3518,8 @@ void TownsCDROM::SetSIRQ_IRR(void)
 
 	PushBool(data,state.delayedSIRQ);
 
-	uint64_t CDDAPlayingSector=state.CDDAPlayPointer;
-	CDDAPlayingSector/=4;
-	CDDAPlayingSector*=SECTOR_PER_SEC_1X; // 75 sector per second
-	CDDAPlayingSector/=CDDA_SAMPLING_RATE; // Make it sector offset.
-	auto CDDAPlayingTime=state.CDDAStartTime.ToHSG()+CDDAPlayingSector;
+	const long long serNow=(nullptr!=townsPtr) ? townsPtr->state.townsTime : 0;
+	const unsigned CDDAPlayingTime=GuestAbsHSG(serNow);
 
 	PushUint32(data,state.CDDAState);
 	PushInt64(data,state.nextCDDAPollingTime);
@@ -1797,6 +3534,9 @@ void TownsCDROM::SetSIRQ_IRR(void)
 
 	PushBool(data,state.lidClosed); // Version 7 or newer
 	PushBool(data,state.lidLocked); // Version 7 or newer
+
+	PushBool(data,state.CDDAAudioOutput); // Version 8 or newer
+	PushUint32(data,state.CDDAWaveBaseTime.ToHSG()); // Version 8 or newer
 }
 /* virtual */ bool TownsCDROM::SpecificDeserialize(const unsigned char *&data,std::string stateFName,uint32_t version)
 {
@@ -1911,6 +3651,11 @@ void TownsCDROM::SetSIRQ_IRR(void)
 	state.discChanged=ReadBool(data);
     
 	state.delayedSIRQ=ReadBool(data);
+	state.delayedCmd=state.cmd;
+	for(int i=0; i<8; ++i)
+	{
+		state.delayedParam[i]=state.paramQueue[i];
+	}
     
 	state.CDDAState=ReadUint32(data);
 	state.nextCDDAPollingTime=ReadInt64(data);
@@ -1919,11 +3664,20 @@ void TownsCDROM::SetSIRQ_IRR(void)
 		state.CDDAStartTime.FromHSG(ReadUint32(data));
 
 		uint64_t CDDAPlayingTime=ReadUint32(data);
-		CDDAPlayingTime-=state.CDDAStartTime.ToHSG();
-		CDDAPlayingTime*=CDDA_SAMPLING_RATE;
-		CDDAPlayingTime/=SECTOR_PER_SEC_1X;
-		CDDAPlayingTime*=4;
-		state.CDDAPlayPointer=CDDAPlayingTime;
+		state.guestPlayAnchorHSG=static_cast<unsigned>(CDDAPlayingTime);
+		state.guestPlayAnchorTownsTime=0; // ResumeCDDAAfterRestore / first Update re-anchors
+		if(CDDA_PLAYING==state.CDDAState)
+		{
+			state.CDDAPauseDiscValid=false;
+		}
+		else if(CDDA_PAUSED==state.CDDAState)
+		{
+			state.CDDAPauseDiscHSG=state.guestPlayAnchorHSG;
+			state.CDDAPauseDiscValid=true;
+		}
+		// Host ptr is set in ResumeCDDAAfterRestore from GuestAbsHSG vs WaveBase
+		// (StartTime-relative offset skews when WaveBase != Start).
+		state.CDDAPlayPointer=0;
 
 		state.CDDAEndTime.FromHSG(ReadUint32(data));
 		state.CDDARepeat=ReadBool(data);
@@ -1957,15 +3711,110 @@ void TownsCDROM::SetSIRQ_IRR(void)
 		state.lidLocked=false;
 	}
 
+	if(8<=version)
+	{
+		state.CDDAAudioOutput=ReadBool(data);
+		state.CDDAWaveBaseTime.FromHSG(ReadUint32(data));
+	}
+	else
+	{
+		state.CDDAAudioOutput=(CDDA_PLAYING==state.CDDAState || CDDA_STOPPING==state.CDDAState);
+		state.CDDAWaveBaseTime=state.CDDAStartTime;
+	}
+
+	// Host-only handshake flags (not in save); drop stale session state.
+	state.completionSIRQSticky=false;
+	state.smicWhileCompletionSticky=false;
+	state.dataReadyCheckbacks=0;
+
 	return true;
 }
 
 void TownsCDROM::ResumeCDDAAfterRestore(void)
 {
+	if(true==audioTrackTable.empty() && 0<state.GetDisc().GetNumTracks())
+	{
+		RebuildAudioTrackTable();
+	}
+	const long long now=(nullptr!=townsPtr) ? townsPtr->state.townsTime : 0;
+	if(CDDA_PLAYING==state.CDDAState)
+	{
+		state.guestPlayAnchorTownsTime=static_cast<unsigned long long>(now);
+		state.CDDAPauseDiscValid=false;
+	}
+	else if(CDDA_PAUSED==state.CDDAState)
+	{
+		if(true!=state.CDDAPauseDiscValid)
+		{
+			state.CDDAPauseDiscHSG=state.guestPlayAnchorHSG;
+			state.CDDAPauseDiscValid=true;
+		}
+		state.guestPlayAnchorTownsTime=0;
+	}
 	if(CDDA_PLAYING==state.CDDAState || CDDA_PAUSED==state.CDDAState)
 	{
-		state.CDDAWave=state.GetDisc().GetWave(state.CDDAStartTime,state.CDDAEndTime);
-		// state.CDDAPlayPointer should have already been set.
+		if(0==state.CDDAWaveBaseTime.ToHSG() && 0!=state.CDDAStartTime.ToHSG())
+		{
+			state.CDDAWaveBaseTime=state.CDDAStartTime;
+		}
+
+		const unsigned guestHSG=GuestAbsHSG(now);
+		const unsigned startHSG=state.CDDAStartTime.ToHSG();
+		const unsigned endHSG=state.CDDAEndTime.ToHSG();
+		unsigned baseHSG=state.CDDAWaveBaseTime.ToHSG();
+
+		// Host cue to guest SubQ. If saved WaveBase does not cover guest, rebuild
+		// from Start (preferred) or from guest itself.
+		if(0==baseHSG || guestHSG<baseHSG || (0!=endHSG && guestHSG>endHSG))
+		{
+			if(0!=startHSG && guestHSG>=startHSG && (0==endHSG || guestHSG<=endHSG))
+			{
+				state.CDDAWaveBaseTime=state.CDDAStartTime;
+			}
+			else
+			{
+				DiscImage::MinSecFrm msf;
+				msf.FromHSG(guestHSG);
+				state.CDDAWaveBaseTime=msf;
+			}
+			baseHSG=state.CDDAWaveBaseTime.ToHSG();
+		}
+
+		state.CDDAWaveBaseTrack=CacheAudioTrackFromMSF(state.CDDAWaveBaseTime);
+		state.CDDAWave=state.GetDisc().GetWave(state.CDDAWaveBaseTime,state.CDDAEndTime);
+
+		const unsigned waveBytes=(state.CDDAWave.size()+3u)&~3u;
+		const unsigned sectors=waveBytes/DiscImage::AUDIO_SECTOR_SIZE;
+		if(0==sectors || guestHSG<baseHSG)
+		{
+			state.CDDAPlayPointer=0;
+		}
+		else
+		{
+			unsigned rel=guestHSG-baseHSG;
+			if(rel>=sectors)
+			{
+				rel=sectors-1u;
+			}
+			const unsigned off=rel*DiscImage::AUDIO_SECTOR_SIZE;
+			state.CDDAPlayPointer=(off<state.CDDAWave.size()) ? off : 0;
+		}
+
+		if(CDDA_PLAYING==state.CDDAState)
+		{
+			state.CDDAAudioOutput=true;
+		}
+		if(true==var.cddaCacheDuringDataRead)
+		{
+			std::ostringstream oss;
+			oss << "[CACHE] state-load resume"
+			    << " guestHSG=" << guestHSG
+			    << " baseHSG=" << baseHSG
+			    << " ptr=" << state.CDDAPlayPointer << "/" << state.CDDAWave.size()
+			    << " cdda=" << state.CDDAState
+			    << " out=" << (state.CDDAAudioOutput ? 1 : 0);
+			LogMonitorLine(oss.str());
+		}
 	}
 }
 
@@ -1974,21 +3823,46 @@ void TownsCDROM::AddWaveForNumSamples(unsigned char waveBuf[],unsigned int numSa
 	if(CDDA_SAMPLING_RATE!=outSamplingRate)
 	{
 		std::cout << "TownsCDROM::int AddWaveForNumSamples does not support other than " << CDDA_SAMPLING_RATE << "Hz" << std::endl;
-		state.CDDAState=CDDA_STOPPING;
+		state.CDDAAudioOutput=false;
 		return;
+	}
+
+	if(true==state.CDDAAudioOutput && 0<numSamples)
+	{
+		state.CDDAHostSamplesMixed+=numSamples;
+		// Grace is sample-based; check here so payback-heavy frames still expire on real audio.
+		if(0!=state.CDDACacheStopAfterHostSamples &&
+		   state.CDDAHostSamplesMixed>=state.CDDACacheStopAfterHostSamples)
+		{
+			CacheOnStopDeadlineReached();
+			if(true!=state.CDDAAudioOutput)
+			{
+				return;
+			}
+		}
 	}
 
 	auto CDDAWaveSize=(state.CDDAWave.size()+3)&~3;  // Just in case, force it to be 4*N.
 	if(0==CDDAWaveSize)
 	{
-		state.CDDAState=CDDA_STOPPING;
+		// Guest playhead owns natural end; empty host wave only mutes output
+		// (prefetch in flight or host discarded while guest still PLAYING).
+		state.CDDAAudioOutput=false;
 		return;
+	}
+
+	// Repeat ON but pointer already past end (e.g. PAUSED host-mix hit EOF between
+	// UpdateCDDAState polls): wrap before mixing or this buffer is silent.
+	if(true==state.CDDARepeat && CDDAWaveSize<=state.CDDAPlayPointer)
+	{
+		state.CDDAPlayPointer=0;
 	}
 
 	if(true==var.CDDAmute)
 	{
 		state.CDDAPlayPointer+=numSamples*4;
-		if(true==state.CDDARepeat)
+		// Only CDDARepeat wraps here. Cache alone must not imply Repeat.
+		if(true==state.CDDARepeat && 0<CDDAWaveSize)
 		{
 			state.CDDAPlayPointer%=CDDAWaveSize;
 		}
@@ -2062,6 +3936,7 @@ void TownsCDROM::AddWaveForNumSamples(unsigned char waveBuf[],unsigned int numSa
 		}
 
 		auto wavePtr = waveBuf;
+		const float userGain=townsPtr->sound.GetCDDAUserGain();
 
 		if(63==Lvol && 63==Rvol)
 		{
@@ -2070,8 +3945,15 @@ void TownsCDROM::AddWaveForNumSamples(unsigned char waveBuf[],unsigned int numSa
 				int L=cpputil::GetSignedWord(wavePtr);
 				int R=cpputil::GetSignedWord(wavePtr+2);
 
-				L+=cpputil::GetSignedWord(state.CDDAWave.data()+state.CDDAPlayPointer);
-				R+=cpputil::GetSignedWord(state.CDDAWave.data()+state.CDDAPlayPointer+2);
+				int Lcd=cpputil::GetSignedWord(state.CDDAWave.data()+state.CDDAPlayPointer);
+				int Rcd=cpputil::GetSignedWord(state.CDDAWave.data()+state.CDDAPlayPointer+2);
+				if(1.0f!=userGain)
+				{
+					Lcd=static_cast<int>(Lcd*userGain);
+					Rcd=static_cast<int>(Rcd*userGain);
+				}
+				L+=Lcd;
+				R+=Rcd;
 
 				L=std::max(std::min(L,32767),-32767);
 				R=std::max(std::min(R,32767),-32767);
@@ -2081,6 +3963,7 @@ void TownsCDROM::AddWaveForNumSamples(unsigned char waveBuf[],unsigned int numSa
 
 				wavePtr+=4;
 				state.CDDAPlayPointer+=4;
+				// Only CDDARepeat wraps. Cache alone must not imply Repeat.
 				if(true==state.CDDARepeat && CDDAWaveSize<=state.CDDAPlayPointer)
 				{
 					state.CDDAPlayPointer=0;
@@ -2097,8 +3980,8 @@ void TownsCDROM::AddWaveForNumSamples(unsigned char waveBuf[],unsigned int numSa
 				int Lcd=cpputil::GetSignedWord(state.CDDAWave.data()+state.CDDAPlayPointer);
 				int Rcd=cpputil::GetSignedWord(state.CDDAWave.data()+state.CDDAPlayPointer+2);
 
-				Lcd=Lcd*Ltr;
-				Rcd=Rcd*Rtr;
+				Lcd=Lcd*Ltr*userGain;
+				Rcd=Rcd*Rtr*userGain;
 
 				L+=Lcd;
 				R+=Rcd;
@@ -2117,9 +4000,12 @@ void TownsCDROM::AddWaveForNumSamples(unsigned char waveBuf[],unsigned int numSa
 				}
 			}
 		}
-		if(true!=state.CDDARepeat && CDDAWaveSize<=state.CDDAPlayPointer)
-		{
-			state.CDDAState=CDDA_STOPPING;
-		}
+	}
+
+	// Host wave exhausted: mute host only. Guest natural end is UpdateCDDAState playhead.
+	if(true!=state.CDDARepeat &&
+	   CDDAWaveSize<=state.CDDAPlayPointer)
+	{
+		state.CDDAAudioOutput=false;
 	}
 }

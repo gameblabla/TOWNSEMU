@@ -287,7 +287,7 @@ void TownsARGV::PrintHelp(void) const
 	std::cout << "-GENFD filename.bin size_in_KB" << std::endl;
 	std::cout << "  Create a new floppy image.  size_in_KB must be 1232, 1440, 640, or 720." << std::endl;
 	std::cout << "-GENHD filename.bin size_in_MB" << std::endl;
-	std::cout << "  Create a new harddisk image." << std::endl;
+	std::cout << "  Create a new sparse harddisk image (logical size only)." << std::endl;
 	std::cout << "-FMVOL volume" << std::endl;
 	std::cout << "-PCMVOL volume" << std::endl;
 	std::cout << "  Specify FM/PCM volume.  Volume will be rounded to 0 to 8192." << std::endl;
@@ -297,6 +297,12 @@ void TownsARGV::PrintHelp(void) const
 	std::cout << "  Render damper-wire line to make you feel nostalgic." << std::endl;
 	std::cout << "-NODAMPERWIRELINE" << std::endl;
 	std::cout << "  Don't render damper-wire line." << std::endl;
+	std::cout << "-SPRITETRANSFERHALF" << std::endl;
+	std::cout << "  Sprite DMA busy time: 36.5us per sprite (half of 73us)." << std::endl;
+	std::cout << "-SPRITETRANSFERUNLIMITED" << std::endl;
+	std::cout << "  Disable sprite DMA transfer timing limit." << std::endl;
+	std::cout << "-SPRITETRANSFERAUTO" << std::endl;
+	std::cout << "  Sprite transfer timing follows FAST/SLOW mode (default)." << std::endl;
 	std::cout << "-SCANLINE15K\n";
 	std::cout << "  Enable scan-line effect in 15KHz screen modes.\n";
 	std::cout << "-TOWNSTYPE" << std::endl;
@@ -373,6 +379,8 @@ void TownsARGV::PrintHelp(void) const
 
 	std::cout << "-VERBOSE\n";
 	std::cout << "  Additional console output.\n";
+	std::cout << "  Also enables leftover device debug (gamepad, CRTC-HST, RS232 Tx echo).\n";
+	std::cout << "  Equivalent to setting environment variable TSUGARU_DEBUG=1.\n";
 }
 
 void TownsARGV::PrintApplicationList(void) const
@@ -475,6 +483,7 @@ bool TownsARGV::AnalyzeCommandParameter(int argc,char *argv[])
 		else if("-VERBOSE"==ARG)
 		{
 			verbose=true;
+			cpputil::EnableDebugLog();
 		}
 		else if("-APP"==ARG)
 		{
@@ -996,28 +1005,13 @@ bool TownsARGV::AnalyzeCommandParameter(int argc,char *argv[])
 		{
 			std::string fName=argv[i+1];
 			unsigned int MB=cpputil::Atoi(argv[i+2]);
-			std::vector <unsigned char> zero;
-			zero.resize(1024*1024);
-			for(auto &z : zero)
-			{
-				z=0;
-			}
-			std::ofstream fp(fName,std::ofstream::binary);
-			if(true==fp.is_open())
-			{
-				while(0!=MB)
-				{
-					fp.write((char *)zero.data(),zero.size());
-					--MB;
-				}
-				fp.close();
-				std::cout << "Created HD Image: " << fName << std::endl;
-		}
-			else
+			const unsigned long long bytes=static_cast<unsigned long long>(MB)*1024ULL*1024ULL;
+			if(true!=cpputil::CreateSparseBinaryFile(fName,bytes))
 			{
 				std::cout << "Failed to write file: " << fName << std::endl;
 				return false;
 			}
+			std::cout << "Created HD Image: " << fName << std::endl;
 			i+=2;
 		}
 		else if("-WINDOWSHIFT"==ARG)
@@ -1054,7 +1048,7 @@ bool TownsARGV::AnalyzeCommandParameter(int argc,char *argv[])
 		}
 		else if("-MAXSNDDBLBUF"==ARG)
 		{
-			maximumSoundDoubleBuffering=true;
+			// Legacy no-op (sound double-buffering flag removed).
 		}
 		else if("-ICM"==ARG && i+1<argc)
 		{
@@ -1116,6 +1110,18 @@ bool TownsARGV::AnalyzeCommandParameter(int argc,char *argv[])
 		else if("-NODAMPERWIRELINE"==ARG)
 		{
 			damperWireLine=false;
+		}
+		else if("-SPRITETRANSFERHALF"==ARG)
+		{
+			spriteTransferMode=SPRITE_TRANSFER_HALF;
+		}
+		else if("-SPRITETRANSFERUNLIMITED"==ARG)
+		{
+			spriteTransferMode=SPRITE_TRANSFER_UNLIMITED;
+		}
+		else if("-SPRITETRANSFERAUTO"==ARG)
+		{
+			spriteTransferMode=SPRITE_TRANSFER_AUTO;
 		}
 		else if("-SCANLINE15K"==ARG)
 		{

@@ -1,6 +1,6 @@
-add_library(discimg discimg.h discimg.cpp)
-target_link_libraries(discimg cpputil)
-target_include_directories(discimg PUBLIC .)
+add_library(discimg discimg.h discimg.cpp discimg_chd.h discimg_chd.cpp)
+target_link_libraries(discimg cpputil chdr-static)
+target_include_directories(discimg PUBLIC . ${CMAKE_CURRENT_SOURCE_DIR}/../externals/libchdr/include)
 
 add_executable(testmsf testmsf.cpp)
 target_link_libraries(testmsf discimg)
@@ -19,6 +19,9 @@ add_executable(test_cdimage test.cpp)
 target_link_libraries(test_cdimage discimg)
 
 
+add_executable(testdiscid testdiscid.cpp)
+target_link_libraries(testdiscid discimg)
+
 add_executable(bincue2wav bincue2wav.cpp)
 target_link_libraries(bincue2wav discimg yssimplesound cpputil)
 if(MSVC)
@@ -28,5 +31,5 @@ elseif(APPLE)
 	mark_as_advanced(COCOA_LIB)
 	target_link_libraries(bincue2wav yssimplesound_macosx ${COCOA_LIB})
 elseif(UNIX)
-	target_link_libraries(bincue2wav yssimplesound_linux_alsa)
+	target_link_libraries(bincue2wav yssimplesound_platform)
 endif()

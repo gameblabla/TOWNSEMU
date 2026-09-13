@@ -304,6 +304,14 @@ public:
 	bool InHSYNC(const unsigned long long int townsTime) const;
 	bool AvoidFirst1msOfVerticalPeriod(const unsigned long long int townsTime) const;
 
+	/*! If neither display page is visible (corrupt / mid-blank save), restore a
+	    usable conventional-page configuration.  Returns true if anything changed. */
+	bool RepairInvisibleDisplayPages(void);
+
+	/*! Clamp illegal FMR VRAM offset / plane mask and repair both-pages-off.
+	    Does not rewrite CRTC registers or sifter (mode-specific timings). */
+	bool RepairCorruptDisplayState(void);
+
 	/*
 	VSYNC Cycle        |<----------------->|
 	Vertical Duration  |<------------->|
@@ -342,7 +350,7 @@ public:
 			if(inCycle<CRT_VERTICAL_DURATION)
 			{
 				state.VSYNC=false;
-				TurnOffVSYNCIRQ();
+				/* VSYNC IRQ stays asserted until software writes 0x5CA. */
 			}
 		}
 	}

@@ -96,6 +96,7 @@ void FMTownsCommon::State::PowerOn(void)
 
 	if(""!=argv.ROMPath)
 	{
+		std::cout << "[ROM] Using ROM directory from command line." << std::endl;
 		if(true!=towns.LoadROMImages(argv.ROMPath.c_str(),argv.verbose))
 		{
 			std::cout << towns.vmAbortReason << std::endl;
@@ -106,10 +107,14 @@ void FMTownsCommon::State::PowerOn(void)
 	{
 		char cwd[4096];
 		getcwd(cwd,sizeof(cwd));
+		std::cout << "[ROM] ROM directory not specified. Trying current directory." << std::endl;
 		if(true!=towns.LoadROMImages(cwd,argv.verbose))
 		{
-			if(true!=towns.LoadROMImages(outside_world->GetProgramResourceDirectory(),argv.verbose))
+			const auto progResDir=outside_world->GetProgramResourceDirectory();
+			std::cout << "[ROM] Trying program resource directory: " << progResDir << std::endl;
+			if(true!=towns.LoadROMImages(progResDir,argv.verbose))
 			{
+				std::cout << "[ROM] Failed to load required ROM images." << std::endl;
 				std::cout << "Usage:" << std::endl;
 				std::cout << "  Tsugaru_CUI rom_directory_name" << std::endl;
 				std::cout << "or," << std::endl;
@@ -167,11 +172,20 @@ void FMTownsCommon::State::PowerOn(void)
 	{
 		auto imgFileName=towns.var.ApplyAlias(argv.cdImgFName);
 		imgFileName=cpputil::ExpandFileName(imgFileName,towns.var.specialPath);
+		std::cout << "[MEDIA] Internal CD-ROM image: " << imgFileName << std::endl;
 		auto errCode=towns.cdrom.state.GetDisc().Open(imgFileName);
 		if(DiscImage::ERROR_NOERROR!=errCode)
 		{
-			std::cout << DiscImage::ErrorCodeToText(errCode);
+			std::cout << "[MEDIA] CD-ROM open failed: " << DiscImage::ErrorCodeToText(errCode) << std::endl;
 		}
+		else
+		{
+			std::cout << "[MEDIA] CD-ROM image loaded." << std::endl;
+		}
+	}
+	else
+	{
+		std::cout << "[MEDIA] No internal CD-ROM image (-CD not specified)." << std::endl;
 	}
 	if(0!=argv.cdSpeed)
 	{
@@ -359,7 +373,6 @@ void FMTownsCommon::State::PowerOn(void)
 	{
 		towns.sound.state.rf5c68.state.volume=argv.pcmVol;
 	}
-	towns.sound.var.maximumDoubleBuffering=argv.maximumSoundDoubleBuffering;
 
 	if(true==argv.powerOffAtBreakPoint)
 	{
@@ -376,6 +389,7 @@ void FMTownsCommon::State::PowerOn(void)
 	std::cout << "Loaded ROM Images.\n";
 
 	towns.Reset();
+	towns.AdjustMachineSpeedForMemoryWait();
 	towns.physMem.takeJISCodeLog=false;
 
 	std::cout << "Virtual Machine Reset.\n";
@@ -403,6 +417,9 @@ void FMTownsCommon::State::PowerOn(void)
 
 	towns.highResPCM.state.enabled=argv.highResPCM;
 
+	towns.ugGenerationIO=argv.ugGenerationIO;
+
+	towns.var.configuredMidiCards=argv.nMidiCards;
 	towns.midi.EnableCards(argv.nMidiCards);
 
 	if(TOWNS_KEYBOARD_MODE_DEFAULT!=argv.keyboardMode)
@@ -435,6 +452,7 @@ void FMTownsCommon::State::PowerOn(void)
 
 	towns.var.damperWireLine=argv.damperWireLine;
 	towns.var.scanLineEffectIn15KHz=argv.scanLineEffectIn15KHz;
+	towns.var.spriteTransferMode=argv.spriteTransferMode;
 	towns.var.forceQuitOnPowerOff=argv.forceQuitOnPowerOff;
 
 	outside_world->throttlePhysicalId=argv.throttlePhysicalId;
@@ -543,6 +561,8 @@ void FMTownsCommon::State::PowerOn(void)
 		towns.fmt3631.EnableAsFMT3632();
 	}
 
+	towns.ApplySpriteTransferTime();
+
 	return result;
 }
 
@@ -600,8 +620,26 @@ void FMTownsCommon::State::Reset(void)
 	TBIOS_physicalAddr=0;
 	MOS_work_linearAddr=0;
 	MOS_work_physicalAddr=0;
+	MOS_code_CS=0;
 	mouseBIOSActive=false;
+	mouseBIOSStartSerial=0;
 	mouseDisplayPage=0;
+	mosCoordAppReadCount=0;
+	mosCoordTbiosSelfReadCount=0;
+	mosCoordSystemCSCount=0;
+	for(auto &cs : mosCoordSystemCS)
+	{
+		cs=0;
+	}
+	mosCoordAppReadCSCount=0;
+	for(auto &cs : mosCoordAppReadCS)
+	{
+		cs=0;
+	}
+	for(auto &h : mosCoordAppReadCSHits)
+	{
+		h=0;
+	}
 
 	serialROMBitCount=0;
 	lastSerialROMCommand=0;
@@ -1062,6 +1100,8 @@ FMTownsCommon::FMTownsCommon() :
 	io.AddDevice(&fmt3631,TOWNSIO_FMT_3632_2);              //      0x9100
 	io.AddDevice(&fmt3631,TOWNSIO_FMT_3632_3);              //      0x9104
 
+	mouseCoordWriteScan.Attach(*this);
+
 	baseClassReady=true;
 }
 
@@ -1253,9 +1293,14 @@ void FMTownsCommon::PowerOn(void)
 void FMTownsCommon::Reset(void)
 {
 	auto &cpu=CPU();
+	StopMosCoordUsageProbe();
 	var.Reset();
 	state.Reset();
 	cpu.Reset();
+	for(auto &p : gameport.state.ports)
+	{
+		p.mouseMotionPacketCount=0;
+	}
 	for(auto devPtr : allDevices)
 	{
 		if(devPtr!=this)
@@ -1279,6 +1324,9 @@ void FMTownsCommon::NotifyDiskRead(void)
 {
 	keyboard.BootSequenceStarted();
 	gameport.BootSequenceStarted();
+	// Arm real-time wait after disk I/O (noWaitStandby, usually false).
+	// Do not force noWait while cache CDDA plays: that left noWait stuck true for the
+	// rest of the track, warped guest timing, and looked like a core freeze.
 	state.noWait=var.noWaitStandby;
 }
 
@@ -1290,6 +1338,33 @@ void FMTownsCommon::ProcessSound(Outside_World *outside_world)
 /* virtual */ void FMTownsCommon::InterceptMouseBIOS(void)
 {
 	auto &cpu=CPU();
+
+	// Count application MOS BIOS calls (other than init/end) made from a non-interrupt,
+	// non-system caller.  This detects apps that read the mouse through the BIOS API rather
+	// than reading the coordinate memory directly (see state.mosBIOSAppCallCount).
+	if(true==state.mouseBIOSActive)
+	{
+		const unsigned int ah=cpu.GetAH();
+		if(0x00!=ah && 0x01!=ah)
+		{
+			const unsigned int csVal=cpu.state.CS().value;
+			const bool systemCaller=
+			    0<cpu.state.inInterruptDepth ||
+			    csVal<0x100 ||
+			    0xF000<=csVal ||
+			    0x110==csVal ||
+			    0x110==(csVal&0xFFF8);
+			if(true!=systemCaller)
+			{
+				++state.mosBIOSAppCallCount;
+				if(true==var.mouseCoordWriteScanEnabled)
+				{
+					mouseCoordWriteScan.OnMosBiosAppCall();
+				}
+			}
+		}
+	}
+
 	if(0==cpu.GetAH())
 	{
 		if(TownsEventLog::MODE_RECORDING==eventLog.mode || TownsEventLog::MODE_PLAYBACK==eventLog.mode)
@@ -1299,6 +1374,10 @@ void FMTownsCommon::ProcessSound(Outside_World *outside_world)
 
 		unsigned int excType,excCode;
 		state.MOS_work_linearAddr=cpu.state.GS().baseLinearAddr+cpu.GetEDI();
+		// Early MOS_work physical address: a provisional base used until the
+		// TBIOS-version-aware XYOffset recomputation below refines it.
+		state.MOS_work_physicalAddr=cpu.DebugLinearAddressToPhysicalAddress(excType,excCode,state.MOS_work_linearAddr,mem);
+		state.MOS_code_CS=cpu.state.CS().value;
 
 		i486DXCommon::SegmentRegister CS;
 		cpu.DebugLoadSegmentRegister(CS,0x110,mem,i486DXCommon::MODE_NATIVE);
@@ -1307,7 +1386,19 @@ void FMTownsCommon::ProcessSound(Outside_World *outside_world)
 		state.TBIOS_mouseInfoOffset=FindTBIOSMouseInfoOffset(state.tbiosVersion,state.TBIOS_physicalAddr);
 
 		state.mouseBIOSActive=true;
+		++state.mouseBIOSStartSerial;
 		state.mouseDisplayPage=0;
+		// Begin MOS-usage probing immediately so NOWAIT cannot skip the soft-cursor window.
+		state.mosCoordSystemCSCount=0;
+		var.mosUsageLearnSystemCS=true;
+		StartMosCoordUsageProbe();
+
+		// Director / multimedia titles may leave sprite H/V offset set.  ATTR_OFFS cursor
+		// sprites then appear shifted while MOS coordinates (hit testing) stay correct.
+		sprite.state.reg[TownsSprite::REG_HORIZONTAL_OFFSET0]=0;
+		sprite.state.reg[TownsSprite::REG_HORIZONTAL_OFFSET1]=0;
+		sprite.state.reg[TownsSprite::REG_VERTICAL_OFFSET0]=0;
+		sprite.state.reg[TownsSprite::REG_VERTICAL_OFFSET1]=0;
 
 		std::cout << "Identified TBIOS as: " << TBIOSIDENTtoString(state.tbiosVersion) << std::endl;
 
@@ -1340,6 +1431,8 @@ void FMTownsCommon::ProcessSound(Outside_World *outside_world)
 		}
 		std::cout << "Mouse BIOS stopped." << std::endl;
 		state.mouseBIOSActive=false;
+		StopMosCoordUsageProbe();
+		var.mosUsageLearnSystemCS=false;
 		state.tbiosVersion=TBIOS_UNKNOWN;
 	}
 	else if(0x02==cpu.GetAH()) // MOS_disp
@@ -1411,6 +1504,25 @@ void FMTownsCommon::ProcessSound(Outside_World *outside_world)
 			eventLog.LogFileExec(state.townsTime,fName);
 		}
 	}
+	if(0x4B00==(AX&0xFF00))
+	{
+		mouseCoordWriteScan.OnDosExec(AX,fName);
+	}
+	else if(0x3D00==(AX&0xFF00))
+	{
+		mouseCoordWriteScan.OnDosFileOpen(AX,fName);
+	}
+	else if(0x4C00==(AX&0xFF00))
+	{
+		mouseCoordWriteScan.OnDosTerminate("terminate");
+	}
+}
+
+/* virtual */ void FMTownsCommon::InterceptINT93H(unsigned int AX,unsigned int fromCS,unsigned int fromEIP)
+{
+	cdrom.var.lastInt93AX=AX;
+	cdrom.var.lastInt93From.SEG=fromCS;
+	cdrom.var.lastInt93From.OFFSET=fromEIP;
 }
 
 void FMTownsCommon::RunFastDevicePollingInternal(void)
@@ -1434,7 +1546,70 @@ void FMTownsCommon::SetUpVRAMAccess(bool breakOnRead,bool breakOnWrite)
 
 bool FMTownsCommon::FASTModeLamp(void) const
 {
-	return (0==state.mainRAMWait && state.VRAMWait<3);
+	// CX 16MHz FAST uses VRAMWait==3; treat <=3 as FAST (was <3).
+	return (0==state.mainRAMWait && state.VRAMWait<=3);
+}
+
+void FMTownsCommon::SetCompatibleMemoryWait(void)
+{
+	// Compatible: main RAM 3WS / VRAM 6WS (CSP / GDEMU; 初代ほか).
+	state.mainRAMWait=3;
+	state.VRAMWait=6;
+}
+
+void FMTownsCommon::SetFastModeMemoryWait(void)
+{
+	state.mainRAMWait=0;
+	// 16MHz FAST (CX): VRAM 3WS. Higher-clock FAST: 0WS.
+	state.VRAMWait=(state.fastModeFreq<=FREQUENCY_SLOWMODE_DEFAULT) ? 3 : 0;
+}
+
+void FMTownsCommon::ApplySpriteTransferTime(void)
+{
+	switch(var.spriteTransferMode)
+	{
+	default:
+	case TownsStartParameters::SPRITE_TRANSFER_AUTO:
+		sprite.state.transferTime=(true==FASTModeLamp() ?
+		    TownsSprite::SPRITE_ONE_TRANSFER_TIME_FASTMODE :
+		    TownsSprite::SPRITE_ONE_TRANSFER_TIME);
+		break;
+	case TownsStartParameters::SPRITE_TRANSFER_HALF:
+		sprite.state.transferTime=TownsSprite::SPRITE_ONE_TRANSFER_TIME_HALF;
+		break;
+	case TownsStartParameters::SPRITE_TRANSFER_UNLIMITED:
+		sprite.state.transferTime=0;
+		break;
+	}
+}
+
+void FMTownsCommon::AdjustMachineSpeedForMemoryWait(void)
+{
+	const bool fast_mode=true==FASTModeLamp();
+	if(true==fast_mode)
+	{
+		state.currentFreq=state.fastModeFreq;
+		// 16MHz-class machines were 386; keep i386DX weights even with FAST (VRAM 3WS).
+		CPU().state.instructionTimingI386DX=(state.fastModeFreq<=FREQUENCY_SLOWMODE_DEFAULT);
+	}
+	else
+	{
+		// Compatible mode: slow clock + i386DX instruction weights.
+		state.currentFreq=var.slowModeFreq;
+		CPU().state.instructionTimingI386DX=true;
+	}
+	ApplySpriteTransferTime();
+
+	if(fast_mode!=var.cachedFastModeLamp)
+	{
+		var.cachedFastModeLamp=fast_mode;
+		var.fastModeLampRevision.fetch_add(1u,std::memory_order_release);
+	}
+
+	// Repaint Memory's per-region bus-wait table so -BUSWAIT/-VRAMBUSWAIT
+	// and the 5E0H/5E2H/5E6H wait-state registers stay live.  No-op unless
+	// the bus-timing model was enabled (see EnableCPU386TimingModel).
+	UpdateBusWaitStates();
 }
 
 void FMTownsCommon::EnableCPU386TimingModel(unsigned int dataBusWidth,unsigned int clockScalePercent,

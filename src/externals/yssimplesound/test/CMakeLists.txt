@@ -15,7 +15,7 @@ if(MSVC)
 elseif(APPLE)
 	target_link_libraries(${TARGET_NAME} yssimplesound_macosx)
 elseif(UNIX)
-	target_link_libraries(${TARGET_NAME} yssimplesound_linux_alsa)
+	target_link_libraries(${TARGET_NAME} yssimplesound_platform)
 endif()
 
 list(APPEND YS_ALL_BATCH_TEST yssimplesound_test)

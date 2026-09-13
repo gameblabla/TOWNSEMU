@@ -83,23 +83,36 @@ void TownsThread::VMMainLoopTemplate(
 	bool terminate=false;
 	for(;true!=terminate;)
 	{
-		auto realTime0=std::chrono::high_resolution_clock::now();
+		auto realTime0=std::chrono::steady_clock::now();
 		auto townsTime0=townsPtr->state.townsTime;
 
 		int runModeCopy=0;
 
 		runModeCopy=runMode;
 
-		bool clockTicking=false;  // Will be made true if VM is running.
+		if(TownsThread::RUNMODE_PAUSE==runModeCopy)
+		{
+			hostPauseAcknowledged_.store(true,std::memory_order_release);
+			if(onPauseTick_)
+			{
+				onPauseTick_(*townsPtr);
+			}
+		}
+		else
+		{
+			hostPauseAcknowledged_.store(false,std::memory_order_release);
+		}
 
-		townsPtr->var.justLoadedState=false;
+		bool clockTicking=false;  // Will be made true if VM is running.
 
 		switch(runMode)
 		{
 		case RUNMODE_PAUSE:
 			{
 				auto saveDiffMouseFlag=outside_world->differentialMouseIntegration;
+				auto saveEffDiffMouseFlag=outside_world->effectiveDifferentialMouseIntegration;
 				outside_world->differentialMouseIntegration=false;
+				outside_world->effectiveDifferentialMouseIntegration=false;
 				// Temporarily disable differential mouse integration.
 				// ForceRender will call window->Communicate, where the flag is copied to the window thread.
 
@@ -108,6 +121,7 @@ void TownsThread::VMMainLoopTemplate(
 				townsPtr->ForceRender(render,*outside_world,*window);
 
 				outside_world->differentialMouseIntegration=saveDiffMouseFlag; // Restore differential mouse integration.
+				outside_world->effectiveDifferentialMouseIntegration=saveEffDiffMouseFlag;
 
 				outside_world->DevicePolling(*townsPtr);
 				townsPtr->rex3586.Polling();
@@ -129,11 +143,13 @@ void TownsThread::VMMainLoopTemplate(
 				{
 					townsPtr->var.nextTimeSync=0;
 				}
-				while(townsPtr->state.townsTime<townsPtr->var.nextTimeSync)
+				while(townsPtr->state.townsTime<townsPtr->var.nextTimeSync &&
+				      RUNMODE_RUN==runMode)
 				{
 					// With the inner-loop, it saves one 64-bit comparison + conditional jump per instruction for RunFastDevicePolling.
 					while(townsPtr->state.townsTime<=townsPtr->state.nextFastDevicePollingTime &&
-					      0==townsPtr->GetStopFlags()) // Same check, except one timer check
+					      0==townsPtr->GetStopFlags() &&
+					      RUNMODE_RUN==runMode) // Same check, except one timer check
 					{
 						townsPtr->RunOneInstruction();
 						townsPtr->pic.ProcessIRQ(townsPtr->CPU(),townsPtr->mem);
@@ -230,6 +246,7 @@ void TownsThread::VMMainLoopTemplate(
 			outside_world->ProcessAppSpecific(*townsPtr);
 			if(townsPtr->state.nextDevicePollingTime<townsPtr->state.townsTime)
 			{
+				outside_world->UpdateEffectiveDifferentialMouseIntegration(*townsPtr);
 				outside_world->UpdateStatusBarInfo(*townsPtr);
 				window->Communicate(outside_world);
 				outside_world->DevicePolling(*townsPtr);
@@ -322,10 +339,14 @@ void TownsThread::VMMainLoopTemplate(
 		uiThread->uiLock.unlock();
 		if(true==townsPtr->var.justLoadedState)
 		{
+			// Skip AdjustRealTime once: townsTime jumped; real-time deficit is meaningless.
+			townsPtr->var.justLoadedState=false;
+			townsPtr->PublishObserverTownsTime();
 		}
 		else if(true==clockTicking)
 		{
-			AdjustRealTime(townsPtr,townsPtr->state.townsTime-townsTime0,realTime0,outside_world);
+			AdjustRealTime(townsPtr,townsPtr->state.townsTime-townsTime0,realTime0,outside_world,sound);
+			townsPtr->PublishObserverTownsTime();
 		}
 	}
 
@@ -409,9 +430,9 @@ void TownsThread::CheckRenderingTimer(FMTownsCommon &towns,class Outside_World::
 //                                     |------>|  New deficit
 
 
-void TownsThread::AdjustRealTime(FMTownsCommon *townsPtr,long long int cpuTimePassed,std::chrono::time_point<std::chrono::high_resolution_clock> time0,Outside_World *outside_world)
+void TownsThread::AdjustRealTime(FMTownsCommon *townsPtr,long long int cpuTimePassed,std::chrono::time_point<std::chrono::steady_clock> time0,Outside_World *outside_world,Outside_World::Sound *sound)
 {
-	long long int realTimePassed=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::high_resolution_clock::now()-time0).count();
+	long long int realTimePassed=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-time0).count();
 
 	townsPtr->var.timeAdjustLog[townsPtr->var.timeAdjustLogPtr]=cpuTimePassed-realTimePassed;
 	townsPtr->var.timeDeficitLog[townsPtr->var.timeAdjustLogPtr]=townsPtr->state.timeDeficit;
@@ -433,12 +454,21 @@ void TownsThread::AdjustRealTime(FMTownsCommon *townsPtr,long long int cpuTimePa
 	{
 		if(true!=townsPtr->state.noWait)
 		{
-			while(townsPtr->state.timeDeficit+realTimePassed<cpuTimePassed)
+			const int64_t target_real_ns=cpuTimePassed-townsPtr->state.timeDeficit;
+			if(realTimePassed<target_real_ns)
 			{
-				townsPtr->ProcessSound(outside_world);
-				realTimePassed=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::high_resolution_clock::now()-time0).count();
+				if(nullptr!=sound)
+				{
+					sound->SyncPcmContract(townsPtr->state.townsTime);
+					const auto sleep_ns=target_real_ns-realTimePassed;
+					sound->PrepareAudioSleep(static_cast<unsigned long long>(sleep_ns));
+				}
+				const auto deadline=time0+std::chrono::nanoseconds(target_real_ns);
+				std::this_thread::sleep_until(deadline);
+				realTimePassed=std::chrono::duration_cast<std::chrono::nanoseconds>(
+				    std::chrono::steady_clock::now()-time0).count();
 			}
-			int64_t newBalance=cpuTimePassed-(townsPtr->state.timeDeficit+realTimePassed);
+			const int64_t newBalance=cpuTimePassed-(townsPtr->state.timeDeficit+realTimePassed);
 			townsPtr->state.timeDeficit=-newBalance;
 		}
 		else
@@ -466,6 +496,29 @@ void TownsThread::SetRunMode(int nextRunMode)
 void TownsThread::SetReturnOnPause(bool flag)
 {
 	returnOnPause=flag;
+}
+
+void TownsThread::SetOnPauseTick(std::function<void(FMTownsCommon &)> fn)
+{
+	onPauseTick_=std::move(fn);
+}
+
+bool TownsThread::WaitForHostPauseAcknowledged(int timeoutMs) const
+{
+	for(int elapsed=0; elapsed<timeoutMs; elapsed+=10)
+	{
+		if(true==hostPauseAcknowledged_.load(std::memory_order_acquire))
+		{
+			return true;
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+	return hostPauseAcknowledged_.load(std::memory_order_acquire);
+}
+
+void TownsThread::ClearHostPauseAcknowledged(void)
+{
+	hostPauseAcknowledged_.store(false,std::memory_order_release);
 }
 
 void TownsThread::PrintStatus(const FMTownsCommon &towns) const

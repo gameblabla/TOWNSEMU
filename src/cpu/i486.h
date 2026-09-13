@@ -1032,6 +1032,16 @@ public:
 
 		bool halt;
 
+		/*! Interrupt-service nesting depth: incremented on Interrupt() entry, decremented on
+		    IRET, reset on HLT.  Used (outside the CPU) to tell reads made from an interrupt
+		    handler (e.g. the TBIOS soft-cursor VSYNC redraw) apart from an application's
+		    main-loop reads.  Best-effort/bounded; drift is self-corrected at HLT. */
+		unsigned int inInterruptDepth=0;
+
+		/*! When true, INST_CLOCKS() selects i386DX weights instead of i486DX.
+		    Compatible (non-FAST) mode forces this on; FAST mode clears it. */
+		bool instructionTimingI386DX=false;
+
 		// [1] pp.26-211 in the description of the MOV instruction
 		// "Loading to SS register inhibits all interrupts until after the execution of the next instruction"
 		bool holdIRQ;
@@ -1342,6 +1352,13 @@ public:
 	{
 	public:
 		virtual void InterceptINT21H(unsigned int AX,const std::string fName)=0;
+		/*! Optional: Disk BIOS (INT 93H) — used to attribute CDC CDDA PLAY to BIOS AH. */
+		virtual void InterceptINT93H(unsigned int AX,unsigned int fromCS,unsigned int fromEIP)
+		{
+			(void)AX;
+			(void)fromCS;
+			(void)fromEIP;
+		}
 	};
 	INT21HInterceptor *int21HInterceptorPtr=nullptr;
 
@@ -1668,6 +1685,11 @@ public:
 	    bottom of the stack.
 	*/
 	void PopCallStack(unsigned int CS,unsigned int EIP);
+
+	/*! Always-on INT 21H notify (Load/Exec path etc.).  Independent of enableCallStack. */
+	void NotifyINT21HIfNeeded(unsigned int INTNum,const Memory &mem);
+	/*! Always-on INT 93H (Disk/CD BIOS) notify for CDDA attribution. */
+	void NotifyINT93HIfNeeded(unsigned int INTNum);
 
 	/*! Attaches a debugger.
 	*/
@@ -4521,6 +4543,7 @@ inline void i486DXCommon::SetRegisterValue8(unsigned int reg,unsigned char value
 
 
 #include "i486loadsegreg.h"
+#include "i486debugfetch.h"
 #include "i486instfetch.h"
 #include "i486templatefunctions.h"
 #include "i486runinstruction.h"

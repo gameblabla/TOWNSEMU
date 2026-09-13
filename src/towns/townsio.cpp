@@ -153,13 +153,11 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 	case TOWNSIO_FASTMODE: //                0x5EC, // [2] pp.794
 		if(0!=(data&1))
 		{
-			state.mainRAMWait=0;
-			state.VRAMWait=0;
+			SetFastModeMemoryWait();
 		}
 		else
 		{
-			state.mainRAMWait=6;
-			state.VRAMWait=6;
+			SetCompatibleMemoryWait();
 		}
 		AdjustMachineSpeedForMemoryWait();
 		break;
@@ -214,7 +212,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 		}
 		break;
 	case TOWNSIO_CPU_MISC3: // 0x24
-		if(TOWNSTYPE_2_UG<=townsType)
+		if(TOWNSTYPE_2_UG<=townsType || true==ugGenerationIO)
 		{
 			return 0x07;
 		}
@@ -348,21 +346,10 @@ void FMTownsCommon::UpdateEleVol(int eleVol)
 {
 	Reset();
 }
-void FMTownsCommon::AdjustMachineSpeedForMemoryWait(void)
-{
-	if(true==FASTModeLamp())
-	{
-		state.currentFreq=state.fastModeFreq;
-		sprite.state.transferTime=TownsSprite::SPRITE_ONE_TRANSFER_TIME_FASTMODE;
-	}
-	else
-	{
-		state.currentFreq=var.slowModeFreq;
-		sprite.state.transferTime=TownsSprite::SPRITE_ONE_TRANSFER_TIME;
-	}
-	UpdateBusWaitStates();
-}
-
+/* AdjustMachineSpeedForMemoryWait lives in towns.cpp (with the FAST-mode
+   i386DX instruction weights and lamp-revision publishing); it still calls
+   the UpdateBusWaitStates below so the 5E0H/5E2H/5E6H registers stay live
+   in the bus-timing model. */
 void FMTownsCommon::UpdateBusWaitStates(void)
 {
 	if(true!=mem.BusTimingModelEnabled())
@@ -393,3 +380,4 @@ void FMTownsCommon::UpdateBusWaitStates(void)
 	mem.SetBusWaitClocks(TOWNSADDR_SPRITERAM_BASE,TOWNSADDR_SPRITERAM_END-1,VRAMWait);
 	mem.SetBusWaitClocks(TOWNSADDR_VRAM_HIGHRES0_BASE,TOWNSADDR_VRAM_HIGHRES2_END-1,VRAMWait);
 }
+

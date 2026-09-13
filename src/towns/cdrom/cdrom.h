@@ -21,6 +21,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 #include <string>
 #include <thread>
 #include <mutex>
+#include <deque>
 #include <algorithm>
 #include "discimg.h"
 #include "device.h"
@@ -117,7 +118,10 @@ public:
 
 	enum
 	{
-		DELAYED_STATUS_IRQ_TIME=  50000,  // Tentatively  50us
+		DELAYED_STATUS_IRQ_TIME=  50000,  // Tentatively  50us (ordering also via completionSIRQSticky)
+		/*! Poll interval while async CDDA GetWave is BUSY (long tracks). 50us spam
+		    made DRY flicker ready and flooded Exec without completion status. */
+		CDDA_PREFETCH_POLL_TIME=1000000,  // 1ms
 		DEFAULT_READ_SECTOR_TIME=5000000, // Tentatively   5ms  1X CD-ROM should be 1second/75frames=13.3ms per sector
 		DEFAULT_SEEK_TIME=            0,
 		NOTIFICATION_TIME=      1000000,  // Tentatively   1ms
@@ -125,6 +129,8 @@ public:
 		SEEK_TIME=            100000000,  // Tentatively 100ms
 		LOSTDATA_TIMEOUT=     100000000,  // Tentatively 100ms. I don't think the CDC had a large FIFO buffer back in 1989. The real time-out should have been much shorter.
 		STATUS_CHECKBACK_TIME=  1000000,
+		/*! Max DEI+IRR holds before forcing Data Ready (100 x 1ms ≈ LOSTDATA window). */
+		STATUS_CHECKBACK_MAX=       100,
 		MAX_NUM_SECTORS=         350000,  // Max 700MB, 2KB per sector.
 
 		SECTOR_PER_SEC_1X=           75,
@@ -196,6 +202,9 @@ public:
 		std::vector <unsigned char> wave;
 		DiscImage *discImg;
 		DiscImage::MinSecFrm from,to;
+		bool restartRequested=false;
+		/*! Abandon in-flight/prefetch result without blocking the VM on GetWave. */
+		bool cancelRequested=false;
 
 	public:
 		AsyncWaveReader();
@@ -203,6 +212,8 @@ public:
 		unsigned int GetState(void);
 		void Start(DiscImage *discImg,DiscImage::MinSecFrm from,DiscImage::MinSecFrm to);
 		std::vector <unsigned char> &GetWave(void);
+		/*! Drop ready data immediately; if BUSY, finish GetWave then go IDLE (no DATAREADY). */
+		void RequestCancel(void);
 
 	private:
 		void ThreadFunc(void);
@@ -247,30 +258,69 @@ public:
 		// (2) Clear SIRQ and DEI, and then
 		// (3) Wait for SIRQ.
 		// It is a near coding error. (1) and (2) must happen in the reverse order.
-		// It was working only because SIRQ from (1) comes with a delay, and
-		// comes after (2).  If the CD-ROM drive had been much faster, the program
-		// won't run because SIRQ from (1) is cleared in (2), and (3) will wait
-		// for an IRQ forever.
-		// To emulate this, I need to introduce delayed status IRQ.
+		// Real hardware got away with it because CDC completion lagged after (2).
+		// Emulation still uses a short delayedSIRQ timer, but Compatible-mode i386DX
+		// clocks can advance townsTime so fast that completion SIRQ lands before (2).
+		// completionSIRQSticky makes that race timing-independent: SMIC cannot drop an
+		// unread completion IRQ (re-assert while status remains); status drain ends it.
 		bool delayedSIRQ=false;
+		/*! Unread command-completion SIRQ: survive premature SMIC (Fractal order). */
+		bool completionSIRQSticky=false;
+		bool smicWhileCompletionSticky=false;
+		/*! DEI+IRR Data-Ready checkbacks; escape to SetStatusDataReady after a bound. */
+		unsigned int dataReadyCheckbacks=0;
+		// Snapshot at ExecuteCDROMCommand: live paramQueue is freed for the next
+		// command while this one is still pending (avoids MODE params corrupting PLAY).
+		unsigned char delayedCmd=0;
+		unsigned char delayedParam[8]={0,0,0,0,0,0,0,0};
 
-		// RAYXANBER waits until the CDDA playing time reaches track 15 during the "DATAWEST" logo screen.
-		// However, .WAV file takes slightly less time to finish, and the playing time returned from CD-ROM
-		// does not reach track 15.  To make sure the virtual CD-ROM reports the last playing time reaching
-		// the last frame given at the time of CDDA Play command, CDDA must take three states:
-		//    IDLE, PLAYING, STOPPING
-		// while stopping, the virtual CD-ROM pretends that CDDA is playing the last frame.
-
-		// BIOS disassembly suggests that command A0H should return status:
+		// ---- Guest CDC (silent; drives SubQ / ah / GETSTATE only) ----
+		// Two-layer model: guest = real no-cache CDC; host = PCM + bridge.
+		// BIOS disassembly: A0H after natural CDDA end returns
 		//   00 00 00 00 07 00 00 00
-		// once CDDA play ended.  For this purpose, the CDDA must have an additional state ENDED.
+		// RAYXANBER: PLAYING → STOPPING → ENDED so SubQ reaches commanded end.
 		unsigned int CDDAState=CDDA_IDLE;
 		long long int nextCDDAPollingTime=0;
 		DiscImage::MinSecFrm CDDAStartTime,CDDAEndTime;
 		bool CDDARepeat=false;
+		/*! Guest playhead: absolute disc HSG at guestPlayAnchorTownsTime (PLAYING). */
+		unsigned int guestPlayAnchorHSG=0;
+		unsigned long long guestPlayAnchorTownsTime=0;
+		/*! Guest-visible disc HSG frozen at PAUSE (SubQ). */
+		unsigned int CDDAPauseDiscHSG=0;
+		bool CDDAPauseDiscValid=false;
 
+		// ---- Host audio (PCM mix; never feeds StatusSecondByte / SubQ) ----
 		std::vector <unsigned char> CDDAWave;
 		unsigned int CDDAPlayPointer=0;
+		DiscImage::MinSecFrm CDDAWaveBaseTime;
+		/*! TOC audio track (1-based) for host wave base; 0 if unknown. */
+		unsigned int CDDAWaveBaseTrack=0;
+		bool CDDAAudioOutput=false;
+		uint64_t CDDAHostSamplesMixed=0;
+		uint64_t CDDACacheStopAfterHostSamples=0; // 0=inactive
+		bool CDDACacheHostStoppedByGrace=false;
+		bool CDDACacheBridgingDataRead=false;
+		/*! Host: PAUSE awaiting quick MODE to keep mix (standalone PAUSE → discard). */
+		bool CDDACacheAwaitModeAfterPause=false;
+		/*! Host: guest state when MODE burst started (bridge context). */
+		unsigned int CDDAStateBeforeDataRead=CDDA_IDLE;
+		/*! Host: short fixed-LBA MODE poll → keep mix. */
+		bool CDDAFixedLbaPolling=false;
+		enum { MODE_POLL_RING=16 };
+		unsigned int modePollHsg[MODE_POLL_RING]={0};
+		unsigned int modePollSectors[MODE_POLL_RING]={0};
+		unsigned int modePollRingUsed=0;
+		unsigned int modePollRingNext=0;
+
+		// MODE1/2/RAW sector transfer in progress (protect schedule from GETSTATE).
+		bool dataTransferActive=false;
+		unsigned char dataTransferCmd=0;
+		/*! MODE armed but waiting for CDDA prefetch to release the disc (ON or OFF). */
+		bool CDDAPrefetchWaitForMode=false;
+		uint64_t modeDeferredSeekTime=0;
+		/*! Soft retries when a MODE sector read returns empty (disc contention). */
+		unsigned int modeSectorEmptyRetries=0;
 
 	private:
 		DiscImage *imgPtr;
@@ -296,6 +346,10 @@ public:
 		// For debugging purposes
 		i486DXCommon::FarPointer lastCmdIssuedAt;
 		i486DXCommon::FarPointer lastParamWrittenAt;
+		unsigned int lastCmdAX=0; // CPU AX when CDC command I/O was written
+		/*! Most recent INT 93H before CDC traffic (caller CS:EIP of INT, AX=BIOS function). */
+		unsigned int lastInt93AX=0;
+		i486DXCommon::FarPointer lastInt93From;
 
 		bool virtuallyRemoved=false; // If true, ready signal (b0 of I/O 4C0H) is kept low.
 
@@ -308,6 +362,11 @@ public:
 		bool debugBreakOnDataReady=false;
 
 		unsigned int sectorReadTimeDelay=0;
+
+		// Host-layer switch: bridge/continue/grace through MODE/PAUSE.
+		// OFF → host follows guest strictly (no bridge; still outputs while guest PLAYING).
+		bool cddaCacheDuringDataRead=true;
+		unsigned int cddaCachePostReadGraceSec=1;
 
 		// If debugBreakOnCommandWrite==true and 0xffff!=debugBreakOnSpecificCommand,
 		// it breaks the VM only if a specific command is sent.
@@ -335,6 +394,15 @@ public:
 
 	State state;
 	Variables var;
+
+	/*! Audio TOC spans rebuilt on disc load (start/end HSG, 1-based track). */
+	struct AudioTrackSpan
+	{
+		unsigned int track=0;
+		unsigned int startHSG=0;
+		unsigned int endHSG=0;
+	};
+	std::vector <AudioTrackSpan> audioTrackTable;
 
 	std::vector <std::string> searchPaths;
 
@@ -384,11 +452,66 @@ public:
 	}
 private:
 	void UpdateCDDAStateInternal(long long int townsTime);
+	void RebuildAudioTrackTable(void);
+
+	// Guest CDC (silent)
+	unsigned int GuestAbsHSG(long long int townsTime) const;
+	void GuestStartPlay(DiscImage::MinSecFrm msfBegin,DiscImage::MinSecFrm msfEnd,bool repeat,long long int townsTime);
+	void GuestPause(long long int townsTime);
+	void GuestResume(long long int townsTime);
+	void GuestStopToEnded(void);
+	void GuestStopToIdle(void);
+
+	// Host audio / bridge
+	/*! TOC track (1-based) for HSG: audioTrackTable, else DiscImage::GetTrackFromMSF. */
+	unsigned int CacheAudioTrackFromHSG(unsigned int hsg) const;
+	unsigned int CacheAudioTrackFromMSF(DiscImage::MinSecFrm msf) const;
+	/*! Host: MODE/bridge/poll context for mid-continue (not await-MODE alone). */
+	bool HostHasModeContinueContext(void) const;
+	/*! Host: reuse wave across PLAY with mid ptr. Never gates guest CDC.
+	    No-MODE: asymmetric begin vs guest SubQ (ahead coarse / behind tight).
+	    MODE context: near host playhead / pause / in-span earlier begin (ptr kept). */
+	bool HostCanContinuePlay(DiscImage::MinSecFrm msfBegin,DiscImage::MinSecFrm msfEnd) const;
+	bool CacheWaveRemaining(void) const;
+	bool CacheHostMixAfterDataRead(void);
+	void CacheClearStopDeadline(void);
+	void CacheArmStopIfNoPlay(void);
+	void CacheArmAwaitModeAfterPause(void);
+	void CacheOnStopDeadlineReached(void);
+	void CacheOnDataReadStarted(unsigned int numSectors);
+	void CacheOnDataReadFinished(void);
+	bool ModeIsShortPollRead(unsigned int numSectors) const;
+	void ModePollClear(void);
+	bool ModePollNoteShortRead(unsigned int hsg0,unsigned int numSectors);
+	/*! Host: keep PCM mix through this MODE (guest already follows CDC stop). */
+	bool ModePollShouldKeepHostMix(unsigned int hsg0,unsigned int hsg1,unsigned int numSectors,unsigned int guestBefore);
+	void PushGetStateStatus(void);
+	bool TryHandleGetStateWithoutStealingSchedule(unsigned char newCmdByte,unsigned char keepCmd);
+	void LogMonitorLine(const std::string &line);
+	/*! Monitor: one line per CDC command phase with → disposition (how it was handled). */
+	void LogCmdEvent(const char phase[],const std::string &disposition);
+	std::string FormatStatusQueueTail(unsigned maxPairs=2) const;
+
+	std::mutex monitorMutex;
+	std::deque <std::string> monitorLines;
+
 public:
 	inline bool CDDAIsPlaying(void) const
 	{
 		return (CDDA_PLAYING==state.CDDAState || CDDA_STOPPING==state.CDDAState);
 	}
+
+	bool CDDAAudioShouldOutput(void) const;
+	void DiscardCDDAWaveCache(void);
+	/*! After SpecificDeserialize, before ResumeCDDAAfterRestore: drop the previous
+	    session's host wave and bridge/grace flags. Leaves play pointer / base time /
+	    CDDAAudioOutput / CDDAState from the state file intact for Resume.
+	    Resume then cues host ptr to GuestAbsHSG within the rebuilt wave. */
+	void DiscardHostCDDACacheForStateLoad(void);
+	/*! App→TOS/TMENU or top-level AH=4CH: discard host CDDA wave so MODE cannot
+	    resurrect BGM without a new PLAY install. Guest CDDAState / pause SubQ stay. */
+	void DiscardCacheOnAppExit(const char *reason);
+	std::vector <std::string> TakeMonitorLines(void);
 
 	inline bool DiscLoadedAndLidClosed(void) const
 	{
@@ -438,6 +561,9 @@ public:
 	*/
 	void RunScheduledTask(unsigned long long int townsTime);
 private:
+	/*! Push MODE accept (00 00) and schedule the first sector after optional prefetch wait. */
+	void StartModeSectorTransfer(uint64_t seekTime);
+
 	void SetStatusDriveNotReadyOrDiscChangedOrNoError(void);
 	bool SetStatusDriveNotReadyOrDiscChanged(void);
 	void SetStatusNoError(void);
@@ -465,7 +591,8 @@ private:
 	/* Turn on IRR flag if status queue is not empty.
 	*/
 	void SetSIRQ_IRR(void);
-
+	/*! Raise SIRQ and arm completion sticky when status bytes are unread. */
+	void RaiseSIRQFlag(void);
 
 	uint32_t SerializeVersion(void) const override;
 	void SpecificSerialize(std::vector <unsigned char> &data,std::string stateFName) const override;

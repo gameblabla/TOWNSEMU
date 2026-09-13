@@ -2,6 +2,7 @@
 #include <string>
 #include <iostream>
 #include <fstream>
+#include <memory>
 #include <discimg.h>
 
 
@@ -62,11 +63,15 @@ int main(int ac,char *av[])
 		return 1;
 	}
 
-	std::vector <DiscImage> discs;
+	// DiscImage owns a std::mutex and a CHD backend pointer, so it is
+	// neither copyable nor movable - hold them by unique_ptr instead of
+	// resizing a vector<DiscImage>.
+	std::vector <std::unique_ptr <DiscImage> > discs;
 	discs.resize(cpi.images.size());
 	for(int i=0; i<cpi.images.size(); ++i)
 	{
-		if(DiscImage::ERROR_NOERROR!=discs[i].Open(cpi.images[i]))
+		discs[i].reset(new DiscImage);
+		if(DiscImage::ERROR_NOERROR!=discs[i]->Open(cpi.images[i]))
 		{
 			std::cout << "Cannot open " << cpi.images[i] << "\n";
 			return 1;
@@ -89,7 +94,7 @@ int main(int ac,char *av[])
 	for(auto &d : discs)
 	{
 		std::cout << "Disc\n";
-		for(auto &t : d.tracks)
+		for(auto &t : d->tracks)
 		{
 			std::cout << "Start:" << t.start.ToHSG() << " End:" << t.end.ToHSG() << " PosInBin:" << t.locationInFile << "\n";
 		}
@@ -104,15 +109,15 @@ int main(int ac,char *av[])
 		std::cout << "and:\n";
 		std::cout << "  " << cpi.images[i] << "\n";
 
-		if(discs[0].GetNumSectors()!=discs[i].GetNumSectors())
+		if(discs[0]->GetNumSectors()!=discs[i]->GetNumSectors())
 		{
 			std::cout << "Number of sectors do not match.\n";
-			std::cout << discs[0].GetNumSectors() << "!=" << discs[i].GetNumSectors() << "\n";
+			std::cout << discs[0]->GetNumSectors() << "!=" << discs[i]->GetNumSectors() << "\n";
 			return 1;
 		}
 
-		auto &tracks0=discs[0].GetTracks();
-		auto &tracks1=discs[i].GetTracks();
+		auto &tracks0=discs[0]->GetTracks();
+		auto &tracks1=discs[i]->GetTracks();
 
 		if(tracks0.size()!=tracks1.size())
 		{
@@ -144,8 +149,8 @@ int main(int ac,char *av[])
 				auto sta=tracks0[j].start;
 				auto end=sta;
 				end.Increment();
-				auto wave0=discs[0].GetWave(sta,end);
-				auto wave1=discs[i].GetWave(sta,end);
+				auto wave0=discs[0]->GetWave(sta,end);
+				auto wave1=discs[i]->GetWave(sta,end);
 				if(0==wave0.size())
 				{
 					std::cout << "Cannot get wave from disc 0 track " << j+1 << "\n";

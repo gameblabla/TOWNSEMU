@@ -13,12 +13,15 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 
 << LICENSE */
 #include <iostream>
+#include <algorithm>
+#include <cstdio>
 #include <cstring> // std::memcpy for Linux compiler
 
 #include "outside_world.h"
 
 #include "towns.h"
 #include "townsdef.h"
+#include "cpputil.h"
 
 
 ////////////////////////////////////////////////////////////
@@ -1339,32 +1342,967 @@ bool Outside_World::PauseKeyPressed(void)
 void Outside_World::ProcessInkey(class FMTownsCommon &towns,int townsKey)
 {
 }
-void Outside_World::ProcessMouse(class FMTownsCommon &towns,int lb,int mb,int rb,int mx,int my)
+void Outside_World::ResetSnapMouseWarmup(void)
 {
-	towns.SetMouseButtonState((0!=lb),(0!=rb));
+	snapMouseWarmupRemaining=std::max(0,snapMouseWarmupFrames);
+	mouseIntegrationActive=false;
+	mouseStationaryCount=MOUSE_STATIONARY_COUNT;
+}
 
+void Outside_World::AfterVMStateLoad(class FMTownsCommon &towns)
+{
+	// Pre-load exotic/desktop latch + MOS serial must not fire a false
+	// HandleAppToDesktopReturn against the restored CRTC/MOS.
+	spriteOffsetSeenInExoticMode_=false;
+	mouseDesktopSnapshotValid_=false;
+	mouseDesktopSnapApplied_=false;
+	mouseInfoRepairFrames_=0;
+	lastMouseBIOSStartSerial_=towns.state.mouseBIOSStartSerial;
+	mouseBIOSStartSerialInited_=true;
+	mouseIntegrationActive=false;
+	mouseStationaryCount=MOUSE_STATIONARY_COUNT;
+	UpdateEffectiveDifferentialMouseIntegration(towns);
+}
+
+void Outside_World::LogHostMessage(const std::string &message)
+{
+	if(false==hostLogPrefix.empty())
 	{
-		int dx=lastMx-mx;
-		int dy=lastMy-my;
-		if(0!=dx || 0!=dy)
+		std::cout << hostLogPrefix;
+	}
+	std::cout << message;
+	if(true==message.empty() || '\n'!=message.back())
+	{
+		std::cout << '\n';
+	}
+	std::cout.flush();
+}
+
+namespace
+{
+bool IsStandardDesktopCrtc(const FMTownsCommon &towns);
+void ClearStaleSpriteOffsetIfNeeded(FMTownsCommon &towns,bool force);
+
+/*! Decide when the host must use mouse capture (relative gameport deltas).
+
+    Default priority (highest first):
+      1. App-specific Phys apply (bound EXE) → absolute
+      2. Mouse BIOS alive → MOS absolute
+      3. Else → mouse capture
+    Mouse capture (profile): always capture.
+    Middle button: MOS/app ↔ temporary capture; natural capture arms/disarms.
+    Capture never starts from a screen click. */
+bool MouseCoordForcesDifferential(const FMTownsCommon &towns,bool standardDesktop)
+{
+	if(true==towns.var.mouseCoordWriteScanEnabled ||
+	   true==towns.var.mouseCoordForceCapture)
+	{
+		return true;
+	}
+	if(true==towns.var.mouseCoordCalibrating)
+	{
+		return true;
+	}
+	if(true==towns.state.mouseBIOSActive)
+	{
+		return false;
+	}
+	const bool profileLoaded=towns.mouseCoordWriteScan.ProfileLoaded();
+	if(true==profileLoaded)
+	{
+		const auto p=towns.mouseCoordWriteScan.GetActiveProfile();
+		if(true==p.WantsDifferential())
 		{
-			// std::cout << "Mouse Integration Active" << std::endl;
-			mouseIntegrationActive=true;
+			return true!=standardDesktop;
+		}
+		// App Phys / MOS profile: absolute while MOS or apply path owns the cursor.
+		if(true==p.verified && true!=standardDesktop &&
+		   (true==p.HasDirectWriteTarget() || true==p.HasGameFeedbackTarget()))
+		{
+			return false;
+		}
+		return true!=standardDesktop;
+	}
+	// No profile + MOS down → mouse capture off the desktop.
+	return true!=standardDesktop;
+}
+}
+
+void Outside_World::UpdateEffectiveDifferentialMouseIntegration(class FMTownsCommon &towns)
+{
+	UpdateMosUsageObservation(towns);
+
+	const bool calibrating=towns.var.mouseCoordCalibrating;
+	const bool standardDesktop=IsStandardDesktopCrtc(towns);
+
+	// App → TOS/TMENU return detection (same signals ProcessMouse used).
+	bool mosReinit=false;
+	if(true!=mouseBIOSStartSerialInited_)
+	{
+		lastMouseBIOSStartSerial_=towns.state.mouseBIOSStartSerial;
+		mouseBIOSStartSerialInited_=true;
+	}
+	else if(lastMouseBIOSStartSerial_!=towns.state.mouseBIOSStartSerial)
+	{
+		lastMouseBIOSStartSerial_=towns.state.mouseBIOSStartSerial;
+		if(1<towns.state.mouseBIOSStartSerial)
+		{
+			mosReinit=true;
+		}
+	}
+	if(true!=standardDesktop)
+	{
+		if(true!=spriteOffsetSeenInExoticMode_)
+		{
+			mouseDesktopSnapApplied_=false;
+		}
+		spriteOffsetSeenInExoticMode_=true;
+		mouseDesktopSnapshotValid_=true;
+	}
+	const bool tosMouseReady=
+	    (0!=towns.state.TBIOS_mouseInfoOffset) ||
+	    (0!=towns.state.MOS_work_physicalAddr);
+	const bool quietDesktop=
+	    true==standardDesktop &&
+	    true==towns.state.mouseBIOSActive &&
+	    // Event scenes can look desktop-like with MOS blips but TBIOS soft is gone (TB:0).
+	    // Real TOS/TMENU return has TBIOS mapped.  V1.1 L10–L30 has no mouseInfoOffset
+	    // (FindTBIOSMouseInfoOffset only fills V2.1 L35); MOS work is the V1.1 signal.
+	    0!=towns.state.tbiosVersion &&
+	    0!=towns.state.TBIOS_physicalAddr &&
+	    true==tosMouseReady;
+	const bool desktopReturn=
+	    (true==spriteOffsetSeenInExoticMode_ && true==quietDesktop) ||
+	    (true==mosReinit && true==quietDesktop);
+	if(true==desktopReturn)
+	{
+		HandleAppToDesktopReturn(towns);
+	}
+
+	const bool mouseCoordForcedDiff=MouseCoordForcesDifferential(towns,standardDesktop);
+	const bool mosActive=towns.state.mouseBIOSActive;
+	const bool discProfilesOn=towns.var.useDiscProfiles;
+	const auto activeProf=towns.mouseCoordWriteScan.GetActiveProfile();
+	const bool profileReady=
+	    true==discProfilesOn &&
+	    true==towns.mouseCoordWriteScan.ProfileLoaded() &&
+	    true==activeProf.verified;
+	const bool profileAppOrNew=
+	    true==profileReady &&
+	    (true==activeProf.HasDirectWriteTarget() ||
+	     true==activeProf.HasGameFeedbackTarget());
+	const bool profileCapture=
+	    true==profileReady && true==activeProf.WantsDifferential();
+	// App-specific: Bind fingerprint arms identity.
+	// Rising apply after bound EXE/EXP start + loader grace (not AH=3DH instant).
+	// Other EXEs (launcher): MOS absolute, no phys.
+	// Bound identity: app phys; MOS soft may still update while BIOS lives.
+	const bool appExecArmed=
+	    true==discProfilesOn &&
+	    towns.mouseCoordWriteScan.AppExecMatched();
+	const bool profileApplySticky=towns.var.mouseCoordProfileApply;
+	if(true==appExecArmed && true==mosActive)
+	{
+		towns.mouseCoordWriteScan.NoteAppExecMosActive(
+		    towns.state.mouseBIOSStartSerial);
+	}
+	const bool inGameReady=
+	    true==appExecArmed &&
+	    towns.mouseCoordWriteScan.AppExecReadyForProfileApply();
+	// App-specific never uses MOS-unused → capture.  Keep MOS absolute until
+	// in-game apply (and alongside apply while MOS remains alive).
+	if(true==profileAppOrNew)
+	{
+		mosUnusedForcedDiff_=false;
+		if(true==mosActive)
+		{
+			mosUsageLatchAbsolute_=true;
+		}
+	}
+	const bool allowProfileApply=
+	    (true==appExecArmed && true==inGameReady) ||
+	    (true==appExecArmed && true==profileApplySticky && true!=mosActive);
+	// Event scenes often match "desktop-like" CRTC (640× zoom2× single page) while still
+	// in-game.  After we have seen exotic CRTC, do not treat that as TMENU for profile
+	// gating — real TOS return clears spriteOffsetSeenInExoticMode_ in HandleAppToDesktopReturn.
+	const bool profileDesktopBlock=
+	    true==standardDesktop && true!=spriteOffsetSeenInExoticMode_;
+	(void)profileDesktopBlock;
+	const bool wantProfileApply=
+	    true==allowProfileApply &&
+	    true!=calibrating &&
+	    true!=towns.var.mouseCoordWriteScanEnabled &&
+	    true!=towns.var.mouseCoordForceCapture &&
+	    (true==profileAppOrNew);
+	if(true==wantProfileApply && true!=profileApplySticky)
+	{
+		// Rising edge: clear residual IO before profile deltas start.
+		// Do not latch MOS-unused → capture; app-specific keeps MOS absolute
+		// alongside phys while Mouse BIOS remains alive.
+		towns.DontControlMouse();
+		// Allow one settle pass even if the host has not moved yet.
+		mouseIntegrationActive=true;
+		mouseStationaryCount=MOUSE_STATIONARY_COUNT;
+	}
+	else if(true!=wantProfileApply && true==profileApplySticky)
+	{
+		// Falling edge (EXE end / TMENU return): drop residual poke state.
+		towns.DontControlMouse();
+	}
+	towns.var.mouseCoordProfileApply=wantProfileApply;
+	towns.mouseCoordWriteScan.NoteMouseProfileApply(wantProfileApply);
+	towns.mouseCoordWriteScan.SyncAppStoreGuard(
+	    true==wantProfileApply && true==activeProf.HasDirectWriteTarget());
+	// MOS absolute must not depend on allowProfileApply (MOS-in-use clears that).
+	const bool profileKeepAbs=
+	    true==discProfilesOn &&
+	    true!=calibrating &&
+	    true!=towns.var.mouseCoordWriteScanEnabled &&
+	    true!=towns.var.mouseCoordForceCapture &&
+	    true!=standardDesktop &&
+	    towns.mouseCoordWriteScan.ProfileKeepsAbsolute();
+
+	if(true==mosActive)
+	{
+		mouseBIOSEverActive_=true;
+		mouseBIOSStoppedForcedDiff_=false;
+	}
+	else
+	{
+		// Absolute/snap needs MOS. Without it, only gameport deltas are valid
+		// (unless an app-specific hold forbids motion). Always default on —
+		// not gated by the MOS-unused checkbox.
+		bool allowForced=true;
+		if(TOWNS_APPSPECIFIC_WINGCOMMANDER2==towns.state.appSpecificSetting &&
+		   true==towns.state.appSpecific_HoldMouseIntegration)
+		{
+			allowForced=false;
+		}
+		// CD mouse-coord profile absolute (incl. direct-write while MOS is down).
+		if(true==towns.var.mouseCoordProfileApply || true==profileKeepAbs)
+		{
+			allowForced=false;
+		}
+		mouseBIOSStoppedForcedDiff_=allowForced;
+	}
+
+	// Decide differential vs absolute/snap first. Capture on/off applies only to
+	// differential; absolute/snap always feeds while the host window is focused.
+	// Default priority: app Phys apply → MOS (if alive) → capture.
+	bool nextDiffWanted=false;
+	if(true==calibrating ||
+	   true==towns.var.mouseCoordWriteScanEnabled ||
+	   true==towns.var.mouseCoordForceCapture)
+	{
+		nextDiffWanted=true;
+	}
+	else if(true==middleForceCapture_)
+	{
+		nextDiffWanted=true;
+	}
+	else if(true==profileCapture)
+	{
+		nextDiffWanted=true;
+	}
+	else if(true==towns.var.mouseCoordProfileApply || true==profileKeepAbs)
+	{
+		// App Phys / explicit MOS absolute for this disc.
+		differentialMouseIntegration=false;
+		nextDiffWanted=false;
+	}
+	else if(true==mosActive)
+	{
+		// Mouse BIOS alive → MOS integration (no unused→capture).
+		differentialMouseIntegration=false;
+		mosUnusedForcedDiff_=false;
+		nextDiffWanted=false;
+	}
+	else if(true==mouseCoordForcedDiff || true==mouseBIOSStoppedForcedDiff_)
+	{
+		nextDiffWanted=true;
+	}
+	else
+	{
+		nextDiffWanted=true!=standardDesktop;
+	}
+
+	if(true==nextDiffWanted)
+	{
+		// Differential must not grab the host mouse on its own: begin with
+		// capture released so the user arms capture with the middle button.
+		// Calibration / memory-scan / force-capture keep feeding.
+		if(true==calibrating ||
+		   true==towns.var.mouseCoordWriteScanEnabled ||
+		   true==towns.var.mouseCoordForceCapture ||
+		   true==middleForceCapture_)
+		{
+			forcedDiffReleaseApplied_=false;
+			if(true==middleForceCapture_)
+			{
+				mouseCaptureReleased_=false;
+			}
+		}
+		else if(true!=forcedDiffReleaseApplied_)
+		{
+			forcedDiffReleaseApplied_=true;
+			mouseCaptureReleased_=true;
+		}
+		// Do not clear mouseCaptureReleased_ here — middle button owns it.
+	}
+	else
+	{
+		// Absolute/snap integration: never keep a stale differential capture-off.
+		forcedDiffReleaseApplied_=false;
+		mouseCaptureReleased_=false;
+		middleForceCapture_=false;
+	}
+
+	bool nextDiff=nextDiffWanted;
+	bool feeding=true;
+	if(true==nextDiffWanted && true==mouseCaptureReleased_)
+	{
+		// Differential with capture released: stop feeding until middle resume.
+		// Report diff=false so the absolute polling path is idle; UI keys off capture_released.
+		feeding=false;
+		nextDiff=false;
+	}
+
+	if(nextDiff!=effectiveDifferentialMouseIntegration ||
+	   feeding!=mouseFeedingEnabled_)
+	{
+		if(true==feeding && true==nextDiff)
+		{
+			mouseInfoRepairFrames_=0;
+			mouseIntegrationActive=false;
+			mouseStationaryCount=MOUSE_STATIONARY_COUNT;
+		}
+		else if(true==feeding && true!=nextDiff)
+		{
+			ResetSnapMouseWarmup();
+			mouseIntegrationActive=false;
+		}
+		else
+		{
+			mouseIntegrationActive=false;
 			mouseStationaryCount=MOUSE_STATIONARY_COUNT;
 		}
 	}
 
-	if(true==mouseIntegrationActive)
+	// Mode / apply / feeding edges: release guest buttons.  Capture grab↔ungrab and
+	// abs↔diff often lose the host button-up, leaving gameport buttons stuck down.
+	const bool pathChanged=
+	    nextDiff!=effectiveDifferentialMouseIntegration ||
+	    feeding!=mouseFeedingEnabled_ ||
+	    wantProfileApply!=profileApplySticky;
+	if(true==pathChanged)
 	{
-		int diffX,diffY;
-		towns.ControlMouse(diffX,diffY,mx,my,towns.state.tbiosVersion);
-		if(-1<=diffX && diffX<=1 && -1<=diffY && diffY<=1) // Added tolerance.
+		towns.SetMouseButtonState(false,false);
+		mouseButtonsForceRelease_=true;
+	}
+
+	effectiveDifferentialMouseIntegration=nextDiff;
+	mouseFeedingEnabled_=feeding;
+	showMouseCursor=
+	    true==mouseCaptureReleased_ ||
+	    true==mouseFailsafeShowHostCursor_;
+}
+
+void Outside_World::HandleAppToDesktopReturn(class FMTownsCommon &towns)
+{
+	ClearStaleSpriteOffsetIfNeeded(towns,true);
+	towns.state.mouseDisplayPage=0;
+	towns.crtc.state.crtcReg[TownsCRTC::REG_FA0]=0;
+	towns.crtc.state.crtcReg[TownsCRTC::REG_FA0+4]=0;
+
+	// End CD mouse-coord profile apply (profile file stays loaded for the next game).
+	// Do not clear Current EXE here: some titles stay in the same EXP while
+	// MOS menus look like TOS/TMENU (desktop CRTC + MOS).  Real process end is
+	// INT 21H AH=4CH → OnDosTerminate("terminate").  Apply is recomputed below
+	// in UpdateEffectiveDifferentialMouseIntegration when identity is still live.
+	if(true==towns.var.mouseCoordProfileApply ||
+	   true==towns.mouseCoordWriteScan.ProfileLoaded())
+	{
+		towns.var.mouseCoordProfileApply=false;
+		towns.mouseCoordWriteScan.NoteMouseProfileApply(false);
+		towns.mouseCoordWriteScan.SyncAppStoreGuard(false);
+	}
+
+	mosUnusedForcedDiff_=false;
+	mosUsageLatchAbsolute_=false;
+	mosUsageObserving_=false;
+	mosUsageLearnPhase_=false;
+	mosUsageObserveSerial_=0;
+
+	// Re-init host→guest mouse for TOS/TMENU (MOS absolute).
+	towns.DontControlMouse();
+	towns.SetMouseButtonState(false,false);
+	mouseButtonsForceRelease_=true;
+	towns.SyncMouseInfoPrevDrawToCurrent();
+	differentialMouseIntegration=false;
+	mouseCaptureReleased_=false;
+	middleForceCapture_=false;
+	forcedDiffReleaseApplied_=false;
+	mouseIntegrationActive=false;
+	mouseStationaryCount=MOUSE_STATIONARY_COUNT;
+
+	// Absolute integration during app→TOS handoff can corrupt soft-cursor XOR
+	// state.  Pause briefly so TOS can re-center (same as a differential-mode exit).
+	mouseInfoRepairFrames_=180;
+	mouseDesktopSnapApplied_=true;
+	ResetSnapMouseWarmup();
+	spriteOffsetSeenInExoticMode_=false;
+
+	// Stale PAUSED host cache would keep mixing through TMENU / next-app MODE
+	// without a new PLAY install. Discard wave; guest CDDAState stays for GETSTATE.
+	towns.cdrom.DiscardCacheOnAppExit("desktop");
+}
+
+void Outside_World::HandleMouseIntegrationMiddleButton(class FMTownsCommon &towns)
+{
+	// Temporary MOS/app → capture override: middle restores absolute.
+	if(true==middleForceCapture_)
+	{
+		middleForceCapture_=false;
+		forcedDiffReleaseApplied_=false;
+		mouseCaptureReleased_=false;
+		UpdateEffectiveDifferentialMouseIntegration(towns);
+		return;
+	}
+
+	// Natural differential with capture released: middle arms capture.
+	if(true==mouseCaptureReleased_)
+	{
+		ResumeMouseCapture(towns);
+		return;
+	}
+
+	// Armed mouse capture: middle disarms (host cursor).
+	if(true==effectiveDifferentialMouseIntegration)
+	{
+		mouseCaptureReleased_=true;
+		UpdateEffectiveDifferentialMouseIntegration(towns);
+		return;
+	}
+
+	// Absolute (MOS / app Phys): middle switches to temporary mouse capture.
+	middleForceCapture_=true;
+	mouseCaptureReleased_=false;
+	forcedDiffReleaseApplied_=false;
+	UpdateEffectiveDifferentialMouseIntegration(towns);
+}
+
+void Outside_World::ResumeMouseCapture(class FMTownsCommon &towns)
+{
+	if(true!=mouseCaptureReleased_)
+	{
+		return;
+	}
+	mouseCaptureReleased_=false;
+	UpdateEffectiveDifferentialMouseIntegration(towns);
+}
+
+void Outside_World::ReleaseMouseCapture(class FMTownsCommon &towns)
+{
+	if(true==mouseCaptureReleased_)
+	{
+		return;
+	}
+	mouseCaptureReleased_=true;
+	UpdateEffectiveDifferentialMouseIntegration(towns);
+}
+
+void Outside_World::SetDifferentialMouseIntegrationPreference(bool enabled,class FMTownsCommon *towns)
+{
+	differentialMouseIntegration=enabled;
+	if(true!=enabled)
+	{
+		// Leaving differential: drop capture-off so absolute/snap feeds immediately.
+		mouseCaptureReleased_=false;
+		forcedDiffReleaseApplied_=false;
+	}
+	if(nullptr!=towns)
+	{
+		UpdateEffectiveDifferentialMouseIntegration(*towns);
+	}
+	else
+	{
+		effectiveDifferentialMouseIntegration=enabled;
+		mouseFeedingEnabled_=true;
+	}
+}
+
+void Outside_World::SetMouseFailsafeShowHostCursor(bool show)
+{
+	mouseFailsafeShowHostCursor_=show;
+	showMouseCursor=
+	    true==mouseCaptureReleased_ ||
+	    true==mouseFailsafeShowHostCursor_;
+}
+
+void Outside_World::SetMouseIntegrationDebugEnabled(bool enabled)
+{
+	mouseIntegrationDebugEnabled_=enabled;
+}
+
+namespace
+{
+/*! Macromedia Director (and similar) often leave sprite H/V offset non-zero.
+    ATTR_OFFS mouse-cursor sprites then draw shifted while MOS hit-test coords stay put —
+    horizontal-only visual skew that survives returning to the TOS desktop.
+    Clear offsets when mouse BIOS is (re)inited or when SPEN falls (typical app exit).
+    Also remember exotic CRTC (page-1 scroll etc.) even when SPEN stays off — WC2 installer. */
+void ClearStaleSpriteOffsetIfNeeded(FMTownsCommon &towns,bool force)
+{
+	if(false==force)
+	{
+		return;
+	}
+	towns.sprite.state.reg[TownsSprite::REG_HORIZONTAL_OFFSET0]=0;
+	towns.sprite.state.reg[TownsSprite::REG_HORIZONTAL_OFFSET1]=0;
+	towns.sprite.state.reg[TownsSprite::REG_VERTICAL_OFFSET0]=0;
+	towns.sprite.state.reg[TownsSprite::REG_VERTICAL_OFFSET1]=0;
+}
+
+int PageVramOffsetY(const FMTownsCommon &towns,unsigned char page)
+{
+	const int bytesPerLine=towns.crtc.GetPageBytesPerLine(page);
+	int voff=(int)towns.crtc.GetPageVRAMAddressOffset(page);
+	const unsigned int vramSize=
+	    (true==towns.crtc.InSinglePageMode() ? 0x80000u : 0x40000u);
+	if((int)(vramSize/2)<=voff)
+	{
+		voff-=(int)vramSize;
+	}
+	return (0!=bytesPerLine ? voff/bytesPerLine : 0);
+}
+
+/*! TOS desktop is page0 zoom2x=2, but WC2/Director keeps page0 looking normal while
+    page1 runs zoom2x=4 and/or Vo1 scroll (Sh:1,1).  Checking only mouseDisplayPage (0)
+    falsely treats that as a quiet desktop and can restore mid-transition. */
+bool IsStandardDesktopCrtc(const FMTownsCommon &towns)
+{
+	if(true==towns.crtc.state.highResCRTCEnabled)
+	{
+		return false;
+	}
+	const auto z0=towns.crtc.GetPageZoom2X(0);
+	const auto o0=towns.crtc.GetPageOriginOnMonitor(0);
+	if(2!=z0.x() || 2!=z0.y() || 0!=o0.x() || 0!=o0.y())
+	{
+		return false;
+	}
+	if(0!=PageVramOffsetY(towns,0))
+	{
+		return false;
+	}
+	if(true!=towns.crtc.InSinglePageMode())
+	{
+		const auto z1=towns.crtc.GetPageZoom2X(1);
+		const auto o1=towns.crtc.GetPageOriginOnMonitor(1);
+		if(2!=z1.x() || 2!=z1.y() || 0!=o1.x() || 0!=o1.y())
+		{
+			return false;
+		}
+		if(0!=PageVramOffsetY(towns,1))
+		{
+			return false;
+		}
+	}
+	if(0!=towns.sprite.HOffset() || 0!=towns.sprite.VOffset())
+	{
+		return false;
+	}
+	return true;
+}
+
+}
+
+void Outside_World::UpdateMosUsageObservation(class FMTownsCommon &towns)
+{
+	// MOS used/unused is only meaningful for Default (AUTO / no explicit mode):
+	//   MOS used   → soft/MOS values change with host → keep MOS absolute
+	//   MOS unused → soft/MOS values stay fixed → mouse capture
+	// Explicit MOS profile: never unused→capture.
+	// App-specific: unused does not switch; launcher/main phase owns phys apply.
+	enum
+	{
+		MOS_SETTLE_DURATION_NS=300000000,  // 0.3s settle after AH=00
+		MOS_MOVE_THRESHOLD=24,             // host px (|dx|+|dy|) before decide
+		SOFT_MOVE_MIN=1,                   // soft px that counts as "tracked"
+	};
+
+	auto stopProbe=[&](void)
+	{
+		if(nullptr!=towns.mosCoordProbeA || nullptr!=towns.mosCoordProbeB)
+		{
+			towns.StopMosCoordUsageProbe();
+		}
+		towns.var.mosUsageLearnSystemCS=false;
+	};
+	auto clearObs=[&](void)
+	{
+		mosUsageObserving_=false;
+		mosUsageLearnPhase_=false;
+		mosTrackSampleValid_=false;
+		mosTrackHostMotion_=0;
+		mosTrackSoftValid_=false;
+		mosUsageAppReadBaseline_=0;
+		mosUsageBiosCallBaseline_=0;
+		mosUsageCaptureFirstActive_=false;
+	};
+
+	if(true!=autoDifferentialOnMosUnused)
+	{
+		stopProbe();
+		mosUnusedForcedDiff_=false;
+		mosUsageLatchAbsolute_=false;
+		clearObs();
+		return;
+	}
+
+	if(true==towns.var.useDiscProfiles &&
+	   true==towns.mouseCoordWriteScan.ProfileLoaded())
+	{
+		const auto p=towns.mouseCoordWriteScan.GetActiveProfile();
+		if(true==p.WantsMosIntegration() ||
+		   true==p.WantsDirectWrite() ||
+		   true==p.WantsGameFeedback() ||
+		   true==p.WantsDifferential())
+		{
+			// MOS / app-specific / capture profiles: no Default unused→capture.
+			stopProbe();
+			mosUnusedForcedDiff_=false;
+			if(true==p.WantsMosIntegration() ||
+			   true==p.WantsDirectWrite() ||
+			   true==p.WantsGameFeedback())
+			{
+				mosUsageLatchAbsolute_=towns.state.mouseBIOSActive;
+			}
+			else
+			{
+				mosUsageLatchAbsolute_=false;
+			}
+			clearObs();
+			return;
+		}
+	}
+
+	if(true!=towns.state.mouseBIOSActive)
+	{
+		// No MOS: differential-only is handled by mouseBIOSStoppedForcedDiff_ elsewhere.
+		if(true!=towns.var.mouseCoordProfileApply)
+		{
+			mosUnusedForcedDiff_=false;
+			mosUsageLatchAbsolute_=false;
+			clearObs();
+		}
+		else
+		{
+			stopProbe();
+		}
+		return;
+	}
+
+	// App-specific profile is applying — MOS soft may still update (双方);
+	// unused detection stays off for app-specific (handled above).
+	if(true==towns.var.mouseCoordProfileApply)
+	{
+		stopProbe();
+		clearObs();
+		return;
+	}
+
+	// New MOS AH=00.  Start absolute and observe.
+	if(mosUsageObserveSerial_!=towns.state.mouseBIOSStartSerial)
+	{
+		mosUsageObserveSerial_=towns.state.mouseBIOSStartSerial;
+		mosUnusedForcedDiff_=false;
+		mosUsageLatchAbsolute_=false;
+		mosUsageObserving_=true;
+		mosUsageLearnPhase_=true;
+		mosUsageObserveStartTownsTime_=towns.state.townsTime;
+		mosTrackSampleValid_=false;
+		mosTrackHostMotion_=0;
+		mosTrackSoftValid_=false;
+		mosUsageAppReadBaseline_=0;
+		mosUsageBiosCallBaseline_=0;
+		mosUsageSysReadBaseline_=0;
+		mosUsageGameportBaseline_=0;
+		towns.var.mosUsageLearnSystemCS=false;
+		mosUsageCaptureFirstActive_=false;
+		mouseCaptureReleased_=false;
+		forcedDiffReleaseApplied_=false;
+		differentialMouseIntegration=false;
+	}
+
+	// Unused is one-way until AH=00.  Soft freeze under capture is not meaningful.
+	if(true==mosUnusedForcedDiff_)
+	{
+		return;
+	}
+
+	// Capture / differential is not driving soft toward host — MOS values will not
+	// track even when MOS is "used"; only judge while Mouse Integration (MOS) is live.
+	if(true==effectiveDifferentialMouseIntegration)
+	{
+		stopProbe();
+		clearObs();
+		return;
+	}
+
+	auto softCursorSnapshot=[&](int &softX,int &softY)->bool
+	{
+		unsigned int spx=0,spy=0;
+		return towns.mouseCoordWriteScan.GetSoftCursorSnapshot(spx,spy,softX,softY);
+	};
+	auto softCursorDead=[&](void)->bool
+	{
+		int softX=0,softY=0;
+		if(true!=softCursorSnapshot(softX,softY))
+		{
+			return true;
+		}
+		return 0==softX && 0==softY;
+	};
+	auto softCursorInactive=[&](void)->bool
+	{
+		// Bound EXE/EXP uses the shared host↔soft tracker (covers frozen non-zero).
+		if(true==towns.mouseCoordWriteScan.AppExecMatched())
+		{
+			return true==towns.mouseCoordWriteScan.SoftCursorInactiveForApp();
+		}
+		return true==softCursorDead();
+	};
+	auto markUnused=[&](const char *msg)
+	{
+		mosUsageLatchAbsolute_=false;
+		mosUnusedForcedDiff_=true;
+		mosUsageObserving_=false;
+		stopProbe();
+		towns.SetMouseButtonState(false,false);
+		LogHostMessage(msg);
+	};
+	auto markUsed=[&](void)
+	{
+		mosUsageLatchAbsolute_=true;
+		mosUsageObserving_=false;
+		stopProbe();
+		LogHostMessage("MOS usage: soft cursor tracks host — keep absolute integration.");
+	};
+
+	// User explicitly chose differential — do not judge.
+	if(true==differentialMouseIntegration)
+	{
+		stopProbe();
+		clearObs();
+		return;
+	}
+
+	// Standard desktop CRTC: defer until exotic CRTC (real TOS never decides).
+	if(true==IsStandardDesktopCrtc(towns))
+	{
+		mosUsageObserving_=true;
+		mosUsageLearnPhase_=true;
+		mosUsageObserveStartTownsTime_=towns.state.townsTime;
+		mosTrackSampleValid_=false;
+		mosTrackHostMotion_=0;
+		mosTrackSoftValid_=false;
+		return;
+	}
+
+	// Phase 1: settle — skip AH=00 init transients.
+	if(true==mosUsageLearnPhase_)
+	{
+		if(MOS_SETTLE_DURATION_NS<=towns.state.townsTime-mosUsageObserveStartTownsTime_)
+		{
+			mosUsageLearnPhase_=false;
+			mosTrackSampleValid_=false;
+			mosTrackHostMotion_=0;
+			mosTrackSoftValid_=false;
+		}
+		return;
+	}
+
+	int softX=0,softY=0;
+	const bool softOk=softCursorSnapshot(softX,softY);
+	if(true!=softOk)
+	{
+		softX=0;
+		softY=0;
+	}
+
+	// Already latched absolute: demote when soft goes inactive (Default → capture).
+	if(true==mosUsageLatchAbsolute_)
+	{
+		if(true==softCursorInactive())
+		{
+			markUnused("MOS usage: soft cursor inactive — switch to mouse capture.");
+		}
+		return;
+	}
+
+	// Phase 2: host moves, soft must move too — else unused.
+	// Do not decide unused on soft 0,0 alone (soft can appear after settle;
+	// unused latch is one-way until the next AH=00).
+	const auto renderSize=towns.crtc.GetRenderSize();
+	const int renderW=renderSize.x();
+	const int renderH=renderSize.y();
+	const int hostX=towns.var.lastKnownMouseX;
+	const int hostY=towns.var.lastKnownMouseY;
+	const bool hostInside=
+	    0<renderW && 0<renderH &&
+	    0<=hostX && hostX<renderW &&
+	    0<=hostY && hostY<renderH;
+	if(true!=hostInside)
+	{
+		mosTrackSampleValid_=false;
+		return;
+	}
+
+	if(true!=mosTrackSoftValid_)
+	{
+		mosTrackSoftX_=softX;
+		mosTrackSoftY_=softY;
+		mosTrackSoftValid_=true;
+	}
+
+	if(true==mosTrackSampleValid_)
+	{
+		const int dx=hostX-mosTrackPrevHostX_;
+		const int dy=hostY-mosTrackPrevHostY_;
+		mosTrackHostMotion_+=(unsigned int)(0<=dx?dx:-dx)+(unsigned int)(0<=dy?dy:-dy);
+	}
+	mosTrackPrevHostX_=hostX;
+	mosTrackPrevHostY_=hostY;
+	mosTrackSampleValid_=true;
+
+	if(MOS_MOVE_THRESHOLD>mosTrackHostMotion_)
+	{
+		return;
+	}
+
+	const int sdx=softX-mosTrackSoftX_;
+	const int sdy=softY-mosTrackSoftY_;
+	const unsigned int softDist=
+	    (unsigned int)(0<=sdx?sdx:-sdx)+(unsigned int)(0<=sdy?sdy:-sdy);
+
+	if(SOFT_MOVE_MIN<=softDist)
+	{
+		markUsed();
+	}
+	else
+	{
+		markUnused("MOS usage: soft cursor ignores host motion — switch to mouse capture.");
+	}
+	mosTrackHostMotion_=0;
+}
+
+void Outside_World::ProcessMouse(class FMTownsCommon &towns,int lb,int mb,int rb,int mx,int my)
+{
+	if(true==mouseButtonsForceRelease_)
+	{
+		mouseButtonsForceRelease_=false;
+		lb=0;
+		mb=0;
+		rb=0;
+	}
+	towns.SetMouseButtonState((0!=lb),(0!=rb));
+
+	const bool spen=towns.sprite.SPEN();
+	if(true==prevSpriteSpen_ && true!=spen)
+	{
+		ClearStaleSpriteOffsetIfNeeded(towns,true);
+	}
+	prevSpriteSpen_=spen;
+
+	// App→TOS/TMENU return (profile end + mouse re-init) is handled in
+	// UpdateEffectiveDifferentialMouseIntegration → HandleAppToDesktopReturn.
+
+	// Pause absolute/snap integration after TOS return (until timeout or host moves).
+	if(true!=effectiveDifferentialMouseIntegration && 0<mouseInfoRepairFrames_)
+	{
+		const bool hostMovedPause=(lastMx!=mx || lastMy!=my);
+		if(true!=hostMovedPause)
+		{
+			--mouseInfoRepairFrames_;
+			towns.DontControlMouse();
+			if(0==mouseInfoRepairFrames_)
+			{
+				towns.SyncMouseInfoPrevDrawToCurrent();
+			}
+			return;
+		}
+		mouseInfoRepairFrames_=0;
+		towns.SyncMouseInfoPrevDrawToCurrent();
+	}
+
+	const bool hostMoved=(lastMx!=mx || lastMy!=my);
+	if(hostMoved)
+	{
+		mouseIntegrationActive=true;
+		mouseStationaryCount=MOUSE_STATIONARY_COUNT;
+		towns.mouseCoordWriteScan.OnHostMouseMotion(mx-lastMx,my-lastMy);
+		// Sample host↔soft while MOS absolute is live (launcher→main), including
+		// while app phys apply is on (双方 — MOS soft may still track).
+		if(true==towns.var.useDiscProfiles &&
+		   true==towns.state.mouseBIOSActive &&
+		   true!=effectiveDifferentialMouseIntegration &&
+		   true!=mosUnusedForcedDiff_ &&
+		   true==towns.mouseCoordWriteScan.AppExecMatched())
+		{
+			unsigned int spx=0,spy=0;
+			int softX=0,softY=0;
+			const bool softOk=
+			    towns.mouseCoordWriteScan.GetSoftCursorSnapshot(spx,spy,softX,softY);
+			const bool softAlive=true==softOk && (0!=softX || 0!=softY);
+			towns.mouseCoordWriteScan.NoteAppExecSoftTrackingSample(
+			    mx,my,softAlive,softX,softY);
+		}
+	}
+
+	const bool profileAbs=towns.var.mouseCoordProfileApply;
+	// App-specific apply: Phys follows settings; MOS side writes soft immediately
+	// inside ControlMouse (no snap warmup while apply is on).
+	const bool snapEnabled=
+	    true==snapMouseIntegration &&
+	    true!=effectiveDifferentialMouseIntegration &&
+	    true!=profileAbs;
+	const bool inSnapWarmup=snapEnabled && 0<snapMouseWarmupRemaining;
+	if(inSnapWarmup)
+	{
+		// Keep gradual integration alive until warmup completes.
+		mouseIntegrationActive=true;
+		mouseStationaryCount=MOUSE_STATIONARY_COUNT;
+	}
+
+	int diffX=0,diffY=0;
+	const bool useSnap=snapEnabled && !inSnapWarmup;
+	// App Phys GF: once settled and the host is still, do not keep closed-loop
+	// correcting.  Continuous refill at the guest's slow mouse-poll cadence
+	// looks like idle diagonal bounce (esp. UW after DS-relative hot resolve).
+	const bool skipIdleProfileApply=
+	    true==profileAbs &&
+	    true!=hostMoved &&
+	    true!=mouseIntegrationActive &&
+	    true!=inSnapWarmup;
+	if(true==skipIdleProfileApply)
+	{
+		towns.DontControlMouse();
+	}
+	else if(true==towns.ControlMouse(diffX,diffY,mx,my,towns.state.tbiosVersion,useSnap))
+	{
+		mouseIntegrationActive=true;
+		if(inSnapWarmup)
+		{
+			// Count warmup only after gradual integration actually runs.
+			--snapMouseWarmupRemaining;
+		}
+		if(-1<=diffX && diffX<=1 && -1<=diffY && diffY<=1)
 		{
 			--mouseStationaryCount;
-			if(mouseStationaryCount<=0)
+			if(mouseStationaryCount<=0 && !inSnapWarmup)
 			{
 				mouseIntegrationActive=false;
-				// std::cout << "Mouse Integration Paused" << std::endl;
 			}
 		}
 		else
@@ -1372,18 +2310,435 @@ void Outside_World::ProcessMouse(class FMTownsCommon &towns,int lb,int mb,int rb
 			mouseStationaryCount=MOUSE_STATIONARY_COUNT;
 		}
 	}
-	else
+	else if(true!=mouseIntegrationActive && !inSnapWarmup)
 	{
 		towns.DontControlMouse();
 		towns.NotifyLastKnownHostMousePosition(mx,my); // At lesat notify where the pointer is.
 	}
+
 	lastMx=mx;
 	lastMy=my;
 }
 
+void Outside_World::UpdateMouseIntegrationDebug(class FMTownsCommon &towns)
+{
+	if(true!=mouseIntegrationDebugEnabled_)
+	{
+		// Soft-cursor shadow polling is live mouse logic, not the debug overlay.
+		if(true==towns.var.mouseCoordWriteScanEnabled)
+		{
+			towns.mouseCoordWriteScan.PollSoftCursorShadow();
+		}
+		return;
+	}
+
+	towns.var.suppressMosCoordReadProbe=true;
+
+	debugMouseBIOSActive=towns.state.mouseBIOSActive;
+	debugEffectiveDifferential=effectiveDifferentialMouseIntegration;
+	debugForcedDifferentialByMouseBIOSStop=mouseBIOSStoppedForcedDiff_;
+	debugForcedDifferentialByMosUnused=mosUnusedForcedDiff_;
+	debugMosUsageObserving=mosUsageObserving_ || mosUsageMonitorAfterUse_;
+	debugMosCoordAppReads=towns.state.mosCoordAppReadCount;
+	debugGameportMousePackets=towns.GetGameportMouseMotionPacketCount();
+	debugMouseCaptureReleased=mouseCaptureReleased_;
+	debugMouseFeedingEnabled=mouseFeedingEnabled_;
+	debugTBIOSVersion=towns.state.tbiosVersion;
+	debugAppSpecific=towns.state.appSpecificSetting;
+	debugMosWorkPhysAddr=towns.state.MOS_work_physicalAddr;
+	debugTbiosMouseInfoOffset=towns.state.TBIOS_mouseInfoOffset;
+
+	debugRawHostMx=towns.var.lastKnownMouseX;
+	debugRawHostMy=towns.var.lastKnownMouseY;
+	towns.TransformHostMouseForIntegration(
+	    debugRawHostMx,debugRawHostMy,
+	    debugCtrlMx,debugCtrlMy,
+	    debugOriginX,debugOriginY,
+	    debugZoom2xX,debugZoom2xY,
+	    debugMousePage);
+
+	debugHwCursorDefined=false;
+	debugHwCursorX=0;
+	debugHwCursorY=0;
+	if(true==towns.crtc.state.highResCRTCEnabled && true==towns.crtc.state.highResCrtcMouse.defined)
+	{
+		debugHwCursorDefined=true;
+		debugHwCursorX=towns.crtc.state.highResCrtcMouse.X;
+		debugHwCursorY=towns.crtc.state.highResCrtcMouse.Y;
+	}
+
+	debugMosMx=0;
+	debugMosMy=0;
+	if(0!=towns.state.MOS_work_physicalAddr)
+	{
+		unsigned int mos_x_off=0x56;
+		unsigned int mos_y_off=0x58;
+		if(TBIOS_V31L22A==towns.state.tbiosVersion)
+		{
+			mos_x_off=0x52;
+			mos_y_off=0x54;
+		}
+		debugMosMx=(int)towns.mem.FetchWord(towns.state.MOS_work_physicalAddr+mos_x_off);
+		debugMosMy=(int)towns.mem.FetchWord(towns.state.MOS_work_physicalAddr+mos_y_off);
+	}
+
+	debugTbiosMx=0;
+	debugTbiosMy=0;
+	if(0!=towns.state.TBIOS_physicalAddr && 0!=towns.state.TBIOS_mouseInfoOffset)
+	{
+		debugTbiosMx=(int)towns.mem.FetchWord(towns.state.TBIOS_physicalAddr+towns.state.TBIOS_mouseInfoOffset+0x0C);
+		debugTbiosMy=(int)towns.mem.FetchWord(towns.state.TBIOS_physicalAddr+towns.state.TBIOS_mouseInfoOffset+0x0E);
+	}
+
+	int gx=0,gy=0;
+	debugGuestValid=towns.GetMouseCoordinate(gx,gy,towns.state.tbiosVersion);
+	debugGuestMx=gx;
+	debugGuestMy=gy;
+	debugSnapWarmupRemaining=snapMouseWarmupRemaining;
+
+	debugHSkip1X=(int)towns.crtc.GetVRAMHSkip1X((unsigned char)debugMousePage);
+	debugSpriteHOffset=(int)towns.sprite.HOffset();
+	debugSpriteVOffset=(int)towns.sprite.VOffset();
+	debugSpriteSpen=towns.sprite.SPEN();
+
+	debugSpriteCursorX=-1;
+	debugSpriteCursorY=-1;
+	debugSpriteNearestX=-1;
+	debugSpriteNearestY=-1;
+	debugSpriteHalfX=-1;
+	debugSpriteHalfY=-1;
+	debugSpriteCursorCount=0;
+	if(true==debugSpriteSpen)
+	{
+		auto *spriteRAM=towns.physMem.state.spriteRAM;
+		const unsigned int xOff=towns.sprite.HOffset();
+		const unsigned int yOff=towns.sprite.VOffset();
+		int bestNearDist=0x7fffffff;
+		int bestHalfDist=0x7fffffff;
+		for(unsigned int spriteIndex=towns.sprite.FirstSpriteIndex();
+		    spriteIndex<TownsSprite::MAX_NUM_SPRITE_INDEX;
+		    ++spriteIndex)
+		{
+			auto *indexPtr=spriteRAM+(spriteIndex<<3);
+			const unsigned int paletteInfo=(unsigned int)(indexPtr[6]|(indexPtr[7]<<8));
+			if(0!=(paletteInfo&TownsSprite::PALETTE_DISP))
+			{
+				continue;
+			}
+			int dstX=(int)((indexPtr[0]|(indexPtr[1]<<8))&511);
+			int dstY=(int)((indexPtr[2]|(indexPtr[3]<<8))&511);
+			const unsigned int attrib=(unsigned int)(indexPtr[4]|(indexPtr[5]<<8));
+			if(0!=(attrib&TownsSprite::ATTR_OFFS))
+			{
+				dstX+=(int)xOff;
+				dstY+=(int)yOff;
+			}
+			++debugSpriteCursorCount;
+			const int nearDist=std::abs(dstX-debugCtrlMx)+std::abs(dstY-debugCtrlMy);
+			if(nearDist<bestNearDist)
+			{
+				bestNearDist=nearDist;
+				debugSpriteNearestX=dstX;
+				debugSpriteNearestY=dstY;
+			}
+			if(2>=std::abs(dstY-debugCtrlMy) &&
+			   (debugSpriteCursorX<0 ||
+			    std::abs(dstX-debugCtrlMx)<std::abs(debugSpriteCursorX-debugCtrlMx)))
+			{
+				debugSpriteCursorX=dstX;
+				debugSpriteCursorY=dstY;
+			}
+			const int halfDist=std::abs(dstX*2-debugCtrlMx)+std::abs(dstY*2-debugCtrlMy);
+			if(2>=std::abs(dstY*2-debugCtrlMy) && halfDist<bestHalfDist)
+			{
+				bestHalfDist=halfDist;
+				debugSpriteHalfX=dstX;
+				debugSpriteHalfY=dstY;
+			}
+		}
+	}
+
+	auto fillVramOffset=[&](unsigned char page,int &ox,int &oy)
+	{
+		const int bytesPerLine=towns.crtc.GetPageBytesPerLine(page);
+		int voff=(int)towns.crtc.GetPageVRAMAddressOffset(page);
+		const unsigned int vramSize=
+		    (true==towns.crtc.InSinglePageMode() ? 0x80000u : 0x40000u);
+		if((int)(vramSize/2)<=voff)
+		{
+			voff-=(int)vramSize;
+		}
+		oy=(0!=bytesPerLine ? voff/bytesPerLine : 0);
+		int hBytes=(0!=bytesPerLine ? voff%bytesPerLine : 0);
+		if(hBytes<0 && 0!=bytesPerLine)
+		{
+			hBytes+=bytesPerLine;
+		}
+		const int bpp=towns.crtc.GetPageBitsPerPixel(page);
+		ox=(0<bpp ? (hBytes*8)/bpp : 0);
+	};
+	fillVramOffset((unsigned char)debugMousePage,debugVramOffsetX,debugVramOffsetY);
+	fillVramOffset(1,debugVramOffsetX1,debugVramOffsetY1);
+	debugFa0_0=(int)towns.crtc.state.crtcReg[TownsCRTC::REG_FA0];
+	debugFa0_1=(int)towns.crtc.state.crtcReg[TownsCRTC::REG_FA0+4];
+
+	debugOrg0X=towns.crtc.GetPageOriginOnMonitor(0).x();
+	debugOrg1X=towns.crtc.GetPageOriginOnMonitor(1).x();
+	debugHSkip0=(int)towns.crtc.GetVRAMHSkip1X(0);
+	debugHSkip1=(int)towns.crtc.GetVRAMHSkip1X(1);
+	{
+		const auto z0=towns.crtc.GetPageZoom2X(0);
+		const auto z1=towns.crtc.GetPageZoom2X(1);
+		debugZoom0X=z0.x();
+		debugZoom0Y=z0.y();
+		debugZoom1X=z1.x();
+		debugZoom1Y=z1.y();
+		debugPageSize0X=towns.crtc.GetPageSizeOnMonitor(0).x();
+		debugPageSize1X=towns.crtc.GetPageSizeOnMonitor(1).x();
+	}
+	debugSinglePage=towns.crtc.InSinglePageMode();
+	debugShowPage0=towns.crtc.state.ShowPage(0);
+	debugShowPage1=towns.crtc.state.ShowPage(1);
+
+	// Candidate size/center words next to TBIOS mouse X/Y (+0x0C/+0x0E) — often 320,240.
+	debugMouseInfoHotX=0;
+	debugMouseInfoHotY=0;
+	if(0!=towns.state.TBIOS_physicalAddr && 0!=towns.state.TBIOS_mouseInfoOffset)
+	{
+		const unsigned int base=
+		    towns.state.TBIOS_physicalAddr+towns.state.TBIOS_mouseInfoOffset;
+		debugMouseInfoHotX=(int)(short)towns.mem.FetchWord(base+0x08);
+		debugMouseInfoHotY=(int)(short)towns.mem.FetchWord(base+0x0A);
+	}
+
+	debugCursorDrawX=-1;
+	debugCursorDrawY=-1;
+	{
+		int cx=0,cy=0;
+		if(true==towns.GetMouseCursorDrawCoordinate(cx,cy))
+		{
+			debugCursorDrawX=cx;
+			debugCursorDrawY=cy;
+		}
+	}
+
+	std::string nextSysRomVersion;
+	{
+		const auto &rom=towns.physMem.sysRom;
+		auto tryCapture=[&](size_t i)->bool
+		{
+			std::string s;
+			for(size_t j=0; j<12 && i+j<rom.size(); ++j)
+			{
+				const unsigned char c=rom[i+j];
+				if(c<0x20 || 0x7E<c)
+				{
+					break;
+				}
+				s.push_back((char)c);
+			}
+			while(!s.empty() && (' '==s.back() || '.'==s.back()))
+			{
+				s.pop_back();
+			}
+			if(4<=s.size())
+			{
+				nextSysRomVersion=s;
+				return true;
+			}
+			return false;
+		};
+		for(size_t i=0; i+4<rom.size(); ++i)
+		{
+			// V6L01 / V6.00L01 / V6L01A
+			if('V'!=rom[i])
+			{
+				continue;
+			}
+			size_t k=i+1;
+			if(k>=rom.size() || rom[k]<'0' || '9'<rom[k])
+			{
+				continue;
+			}
+			++k;
+			if(k<rom.size() && '.'==rom[k])
+			{
+				++k;
+				while(k<rom.size() && rom[k]>='0' && rom[k]<='9')
+				{
+					++k;
+				}
+			}
+			while(k<rom.size() && ' '==rom[k])
+			{
+				++k;
+			}
+			if(k>=rom.size() || 'L'!=rom[k])
+			{
+				continue;
+			}
+			if(true==tryCapture(i))
+			{
+				break;
+			}
+		}
+	}
+
+	std::string nextTbiosId;
+	std::string nextTbiosDate;
+	std::string nextTosVersion;
+	bool refreshTbiosIds=false;
+	if(debugVersionCacheTbiosPhys_!=towns.state.TBIOS_physicalAddr)
+	{
+		debugVersionCacheTbiosPhys_=towns.state.TBIOS_physicalAddr;
+		refreshTbiosIds=true;
+		if(0!=towns.state.TBIOS_physicalAddr)
+		{
+			std::string id[4];
+			towns.GetTBIOSIdentifierStrings(id,towns.state.TBIOS_physicalAddr);
+			nextTbiosId=id[0];
+			nextTbiosDate=id[1];
+
+			// Prefer an explicit "V2.1Lxx" (or V1.1Lxx) string inside TBIOS image.
+			for(unsigned int ptr=0; ptr<0x40000; ++ptr)
+			{
+				const unsigned char c0=towns.mem.FetchByte(towns.state.TBIOS_physicalAddr+ptr);
+				if('V'!=c0)
+				{
+					continue;
+				}
+				const unsigned char c1=towns.mem.FetchByte(towns.state.TBIOS_physicalAddr+ptr+1);
+				const unsigned char c2=towns.mem.FetchByte(towns.state.TBIOS_physicalAddr+ptr+2);
+				const unsigned char c3=towns.mem.FetchByte(towns.state.TBIOS_physicalAddr+ptr+3);
+				const unsigned char c4=towns.mem.FetchByte(towns.state.TBIOS_physicalAddr+ptr+4);
+				if((('1'==c1 && '.'==c2 && '1'==c3) || ('2'==c1 && '.'==c2 && '1'==c3)) &&
+				   'L'==c4)
+				{
+					std::string s;
+					for(unsigned int j=0; j<12; ++j)
+					{
+						const unsigned char c=towns.mem.FetchByte(towns.state.TBIOS_physicalAddr+ptr+j);
+						if(c<0x20 || 0x7E<c)
+						{
+							break;
+						}
+						s.push_back((char)c);
+					}
+					if(6<=s.size())
+					{
+						nextTosVersion=s;
+						break;
+					}
+				}
+			}
+			if(true==nextTosVersion.empty())
+			{
+				// Fallback: map known TBIOS builds to the Towns OS family that ships them.
+				if("V31L35"==nextTbiosId)
+				{
+					if(0==nextTbiosDate.find("94/") || 0==nextTbiosDate.find("95/"))
+					{
+						nextTosVersion="V2.1L50? (TBIOS date)";
+					}
+					else if(0==nextTbiosDate.find("93/"))
+					{
+						nextTosVersion="V2.1L30-L40? (TBIOS date)";
+					}
+				}
+				else if("V31L31"==nextTbiosId ||
+				        TBIOS_V31L31_91==towns.state.tbiosVersion ||
+				        TBIOS_V31L31_92==towns.state.tbiosVersion ||
+				        TBIOS_V31L31_93==towns.state.tbiosVersion)
+				{
+					nextTosVersion="V2.1L10B-L20A? (TBIOS id)";
+				}
+			}
+		}
+	}
+
+	std::string nextMouseInfoWords;
+	if(0!=towns.state.TBIOS_physicalAddr && 0!=towns.state.TBIOS_mouseInfoOffset)
+	{
+		const unsigned int base=
+		    towns.state.TBIOS_physicalAddr+towns.state.TBIOS_mouseInfoOffset;
+		char buf[32];
+		for(unsigned int off=0; off<=0x2C; off+=2)
+		{
+			const int w=(int)(short)towns.mem.FetchWord(base+off);
+			std::snprintf(buf,sizeof(buf),"+%02X:%d ",off,w);
+			nextMouseInfoWords+=buf;
+		}
+	}
+
+	std::string nextMosWorkWords;
+	if(0!=towns.state.MOS_work_physicalAddr)
+	{
+		char buf[32];
+		for(unsigned int off=0x40; off<=0x70; off+=2)
+		{
+			const int w=(int)(short)towns.mem.FetchWord(towns.state.MOS_work_physicalAddr+off);
+			std::snprintf(buf,sizeof(buf),"+%02X:%d ",off,w);
+			nextMosWorkWords+=buf;
+		}
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(mouseDebugUiMutex);
+		debugSysRomVersion=std::move(nextSysRomVersion);
+		if(true==refreshTbiosIds)
+		{
+			debugTbiosId=std::move(nextTbiosId);
+			debugTbiosDate=std::move(nextTbiosDate);
+			debugTosVersion=std::move(nextTosVersion);
+		}
+		debugMouseInfoWords=std::move(nextMouseInfoWords);
+		debugMosWorkWords=std::move(nextMosWorkWords);
+	}
+
+	debugMouseSnapValid=mouseDesktopSnapshotValid_;
+	debugMouseSnapApplied=mouseDesktopSnapApplied_;
+	debugMouseInfoRepair=mouseInfoRepairFrames_;
+	debugMiPrevX=0;
+	debugMiPrevY=0;
+	debugMiPaintX=0;
+	debugMiPaintY=0;
+	if(0!=towns.state.TBIOS_physicalAddr && 0!=towns.state.TBIOS_mouseInfoOffset)
+	{
+		const unsigned int base=
+		    towns.state.TBIOS_physicalAddr+towns.state.TBIOS_mouseInfoOffset;
+		debugMiPrevX=(int)(short)towns.mem.FetchWord(base+0x10);
+		debugMiPrevY=(int)(short)towns.mem.FetchWord(base+0x12);
+		debugMiPaintX=(int)(short)towns.mem.FetchWord(base+0x28);
+		debugMiPaintY=(int)(short)towns.mem.FetchWord(base+0x2A);
+	}
+
+	if(true==towns.var.mouseCoordWriteScanEnabled)
+	{
+		towns.mouseCoordWriteScan.PollSoftCursorShadow();
+	}
+
+	towns.var.suppressMosCoordReadProbe=false;
+}
+
 void Outside_World::ProcessMouseDifferential(class FMTownsCommon &towns,int lb,int mb,int rb,int dx,int dy,int refX,int refY)
 {
+	if(true==mouseButtonsForceRelease_)
+	{
+		mouseButtonsForceRelease_=false;
+		lb=0;
+		mb=0;
+		rb=0;
+	}
 	towns.SetMouseButtonState((0!=lb),(0!=rb));
+
+	if(0!=dx || 0!=dy)
+	{
+		towns.mouseCoordWriteScan.OnHostMouseMotion(dx,dy);
+	}
+	if(true==towns.var.mouseCoordWriteScanEnabled)
+	{
+		towns.mouseCoordWriteScan.PollSoftCursorShadow();
+	}
 
 	if(0!=dx || 0!=dy) // Removed Tolerance
 	// if(dx<-1 || 1<dx || dy<-1 || 1<dy)
@@ -1639,51 +2994,124 @@ Outside_World::WindowInterface::~WindowInterface()
 */
 void Outside_World::WindowInterface::BaseInterval(void)
 {
+	if(true!=shared.needRender)
+	{
+		FlushOneCaptureToShared();
+	}
+
 	newImageLock.lock();
 	if(true==shared.needRender)
 	{
 		shared.renderer.BuildImage(shared.VRAMCopy,shared.paletteCopy,shared.chaseHQPaletteCopy);
 		shared.needRender=false;
 		auto imageNeedsFlipCopy=shared.imageNeedsFlip;
-		newImageLock.unlock();
+		const auto captureTownsTimeCopy=shared.captureTownsTime;
 
-		winThr.newImageRendered=true;
-
-		// Rendered image won't be touched by the VM Thread.  Safe to cook.
+		// Keep newImageLock through Flip/MoveImage: VM SendNewImage→FlushOneCaptureToShared
+		// can otherwise ApplyPreparedState on the same renderer (heap corruption).
 		if(true==imageNeedsFlipCopy)
 		{
 			shared.renderer.FlipUpsideDown();
 		}
 
 		auto img=shared.renderer.MoveImage();
-		std::swap(winThr.mostRecentImage,img);
+		{
+			std::lock_guard<std::mutex> imgLock(renderingLock);
+			std::swap(winThr.mostRecentImage,img);
+			winThr.newImageRendered=true;
+			winThr.lastCaptureTownsTime=captureTownsTimeCopy;
+		}
+		newImageLock.unlock();
+
+		FlushOneCaptureToShared();
 	}
 	else
 	{
 		newImageLock.unlock();
 	}
 }
+bool Outside_World::WindowInterface::EnqueueCapture(class FMTownsCommon &towns,bool imageNeedsFlip)
+{
+	VmCaptureSlot slot;
+	const auto vramBytes=towns.crtc.GetEffectiveVRAMSize();
+	slot.vramBytes=vramBytes;
+	std::memcpy(slot.VRAM,towns.GetUsingVRAM(),vramBytes);
+	slot.palette=towns.crtc.GetPalette();
+	slot.chaseHQ=towns.crtc.chaseHQPalette;
+	slot.captureTownsTime=towns.state.townsTime;
+	slot.imageNeedsFlip=imageNeedsFlip;
+	slot.rendererState=TownsRender::MakePreparedState(
+	    towns.crtc,towns.var.damperWireLine,towns.var.scanLineEffectIn15KHz);
+
+	std::lock_guard<std::mutex> lock(vmCaptureMutex);
+	if(VM_CAPTURE_QUEUE_DEPTH<=vmCaptureQueue.size())
+	{
+		vmCaptureQueue.pop_front();
+	}
+	vmCaptureQueue.push_back(std::move(slot));
+	return true;
+}
+bool Outside_World::WindowInterface::FlushOneCaptureToShared(void)
+{
+	std::unique_lock<std::mutex> vmLock(vmCaptureMutex);
+	if(true==vmCaptureQueue.empty())
+	{
+		return false;
+	}
+
+	if(false==newImageLock.try_lock())
+	{
+		return false;
+	}
+
+	if(true==shared.needRender)
+	{
+		newImageLock.unlock();
+		return false;
+	}
+
+	auto slot=std::move(vmCaptureQueue.front());
+	vmCaptureQueue.pop_front();
+	vmLock.unlock();
+
+	const auto vramBytes=slot.vramBytes;
+	std::memcpy(shared.VRAMCopy,slot.VRAM,vramBytes);
+	shared.paletteCopy=slot.palette;
+	shared.chaseHQPaletteCopy=slot.chaseHQ;
+	shared.imageNeedsFlip=slot.imageNeedsFlip;
+	shared.captureTownsTime=slot.captureTownsTime;
+	shared.renderer.ApplyPreparedState(slot.rendererState);
+	shared.needRender=true;
+
+	newImageLock.unlock();
+	return true;
+}
+size_t Outside_World::WindowInterface::VmCaptureQueueDepth(void) const
+{
+	std::lock_guard<std::mutex> lock(vmCaptureMutex);
+	return vmCaptureQueue.size();
+}
+void Outside_World::WindowInterface::ClearPendingCaptures(void)
+{
+	{
+		std::lock_guard<std::mutex> lock(vmCaptureMutex);
+		vmCaptureQueue.clear();
+	}
+	std::lock_guard<std::mutex> imgLock(newImageLock);
+	shared.needRender=false;
+}
 /*! Called from the VM thread to tell the new image should be rendered.
-    It will try_lock the renderer, but it fails, it gives up not to block
-    the VM thread.
+    Captures are queued on the VM thread and flushed when the GUI thread
+    is ready, so try_lock failure does not drop a frame.
 */
 bool Outside_World::WindowInterface::SendNewImage(class FMTownsCommon &towns,bool imageNeedsFlip)
 {
-	if(true==newImageLock.try_lock())
+	if(true!=EnqueueCapture(towns,imageNeedsFlip))
 	{
-		shared.renderer.Prepare(towns.crtc);
-		shared.renderer.damperWireLine=towns.var.damperWireLine;
-		shared.renderer.scanLineEffectIn15KHz=towns.var.scanLineEffectIn15KHz;
-		memcpy(shared.VRAMCopy,towns.GetUsingVRAM(),towns.crtc.GetEffectiveVRAMSize());
-		shared.paletteCopy=towns.crtc.GetPalette();
-		shared.chaseHQPaletteCopy=towns.crtc.chaseHQPalette;
-		shared.imageNeedsFlip=imageNeedsFlip;
-		shared.needRender=true;
-
-		newImageLock.unlock();
-		return true;
+		return false;
 	}
-	return false;
+	FlushOneCaptureToShared();
+	return true;
 }
 /*! Called from the VM thread to tell VM is closed.
 */
